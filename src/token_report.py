@@ -179,7 +179,8 @@ def main():
     print(f"{'='*60}")
 
     if show_all:
-        for p in sorted(projects, key=lambda x: x.get("project_total_cost", 0), reverse=True):
+        top_level = [p for p in projects if not p.get("parent_pid")]
+        for p in sorted(top_level, key=lambda x: x.get("project_total_cost", 0), reverse=True):
             print_project(p, verbose, children=children_idx.get(p.get("pid")))
     else:
         cwd = os.getcwd()
