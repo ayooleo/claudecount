@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#changelog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Real-time token usage and cost tracking for Claude Code (Terminal), shown directly in the status bar.
@@ -181,6 +181,16 @@ Prices are per million tokens. **Opus 4.7 / 4.6** and **Sonnet 4.6** support a 1
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.2.0] — 2026-05-07
+
+**Added**
+- Auto-rollup pid resolution: cd-ing into an untracked subdirectory of an existing project no longer creates a new top-level project record. The Stop / SessionStart / UserPromptSubmit hooks and `token_status.sh` walk up the directory tree and attribute activity to the nearest tracked ancestor. Pre-existing subdir projects (with their own record) keep accumulating to themselves; use `--merge-into-parent` to consolidate after the fact, or `--set-parent` to keep a subdir tracked separately *and* shown under its parent
+- `--set-parent` now accepts project **names** in addition to paths, and supports **batch** linking: `--set-parent ginzok-online Ginweb server projects` mounts three children under one parent in a single call
+- `--list-projects` mode: tab-separated machine-readable list (`name<TAB>parent<TAB>cost<TAB>cwd`), used by the `claudecount-set-parent` skill to show candidates
+
+**Changed**
+- `claudecount-set-parent` skill rewritten to handle both directions of natural-language phrasing ("把 X 挂到 Y 下" / "在这里把 X 设为子项目"), batch input, and name-based references — with an optional `--list-projects` pre-step when intent is ambiguous
 
 ### [1.1.0] — 2026-04-29
 

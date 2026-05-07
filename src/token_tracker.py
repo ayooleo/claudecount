@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -135,6 +135,37 @@ def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
 
 def project_id(cwd: str) -> str:
     return hashlib.md5(cwd.encode()).hexdigest()[:12]
+
+
+def resolve_pid_for_cwd(cwd: str) -> str:
+    """Resolve cwd to the pid of the nearest tracked project.
+
+    Rule:
+      - cwd itself has a project record → use cwd's own pid
+      - else walk up; first ancestor with `projects/<pid>.json` wins
+      - nothing tracked above → fall back to cwd's own pid (creates new record)
+
+    Implements implicit sub-project rollup: cd-ing into an unseen subdir of an
+    existing project doesn't pollute the project list with a new record — its
+    activity is attributed to the nearest tracked ancestor. Pre-existing subdir
+    projects (with their own record) keep accumulating to themselves, since the
+    own-record check short-circuits the walk-up. Use --merge-into-parent to
+    consolidate after the fact.
+    """
+    cwd = os.path.abspath(cwd)
+    own = project_id(cwd)
+    if (DATA_DIR / f"{own}.json").exists():
+        return own
+    cur = cwd
+    while True:
+        parent = os.path.dirname(cur)
+        if not parent or parent == cur:
+            break
+        cand = project_id(parent)
+        if (DATA_DIR / f"{cand}.json").exists():
+            return cand
+        cur = parent
+    return own
 
 
 def read_transcript(path: str) -> list:
@@ -634,8 +665,21 @@ def _reset_session_state(session_id: str, cwd: str, model_hint: str = ""):
     Used by both SessionStart and UserPromptSubmit hooks. SessionStart's `model` hook field
     seeds the model display before the first status-line render arrives."""
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
-    pid = project_id(cwd)
+    pid = resolve_pid_for_cwd(cwd)
     status_file = STATUS_DIR / f"{pid}.json"
+
+    # If we rolled up to a tracked ancestor, that ancestor's name/cwd is the
+    # identity to display, not the deeper subdir we were invoked in.
+    rolled_up = pid != project_id(cwd)
+    if rolled_up:
+        try:
+            anc = json.loads((DATA_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+            display_name = anc.get("name") or Path(cwd).name
+            display_cwd  = anc.get("cwd")  or cwd
+        except Exception:
+            display_name, display_cwd = Path(cwd).name, cwd
+    else:
+        display_name, display_cwd = Path(cwd).name, cwd
 
     try:
         status = json.loads(status_file.read_text(encoding="utf-8"))
@@ -649,8 +693,8 @@ def _reset_session_state(session_id: str, cwd: str, model_hint: str = ""):
     live_win_size = status.get("context", {}).get("window_size", 0)
 
     status["session_id"] = session_id
-    status["project_name"] = Path(cwd).name
-    status["cwd"] = cwd
+    status["project_name"] = display_name
+    status["cwd"] = display_cwd
     status["pid"] = pid
     status["model"] = model_hint
     status["last_turn"] = {
@@ -908,79 +952,112 @@ def _attach_parent(status: dict, project: dict):
         status.pop("parent_name", None)
 
 
+def _resolve_target(arg: str) -> str:
+    """Map a user-supplied parent/child argument to an absolute cwd path.
+
+    Accepts in order:
+      1. an existing path (absolute, relative, or `~`-expanded) → its abspath
+      2. a project `name` (from any tracked projects/*.json) → that project's cwd
+      3. fallback: abspath(arg) — lets the user pre-link a not-yet-existing dir
+    """
+    expanded = os.path.expanduser(arg)
+    abs1 = os.path.abspath(expanded)
+    if os.path.exists(expanded):
+        return abs1
+    if DATA_DIR.exists():
+        for f in DATA_DIR.glob("*.json"):
+            try:
+                p = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if p.get("name") == arg and p.get("cwd"):
+                return p["cwd"]
+    return abs1
+
+
 def set_parent_mode(argv: list):
-    """Explicit, user-driven sub-project link: mark `child` as a sub-project of
-    `parent`. Both must already exist as ClaudeCount projects (i.e. have run at
-    least one Stop hook). Single-level only — a parent cannot itself have a
-    parent. Idempotent.
+    """Explicit, user-driven sub-project link: mark each `child` as a sub-project
+    of `parent`. Single-level only — a parent cannot itself have a parent.
+    Idempotent.
+
+    Each <parent> / <child> may be a path OR a project name (resolved by
+    scanning projects/*.json for a matching `name`).
 
     Usage:
-      --set-parent <parent_path>             # child defaults to cwd
-      --set-parent <parent_path> <child_path>
+      --set-parent <parent>                       # child defaults to cwd
+      --set-parent <parent> <child>
+      --set-parent <parent> <child1> <child2> ... # batch
     """
     if not argv:
-        print("usage: --set-parent <parent_path> [child_path]")
+        print("usage: --set-parent <parent> [child ...]")
+        print("  <parent> / <child> may be a path or a project name")
         return
-    parent_cwd = os.path.abspath(argv[0])
-    child_cwd  = os.path.abspath(argv[1] if len(argv) > 1 else os.getcwd())
+    parent_cwd = _resolve_target(argv[0])
+    child_args = argv[1:]
+    if child_args:
+        children = [_resolve_target(a) for a in child_args]
+    else:
+        children = [os.path.abspath(os.getcwd())]
+
     parent_pid = project_id(parent_cwd)
-    child_pid  = project_id(child_cwd)
-
-    if parent_pid == child_pid:
-        print(f"refusing to link a project to itself ({parent_cwd})")
-        return
-
     parent_file = DATA_DIR / f"{parent_pid}.json"
-    child_file  = DATA_DIR / f"{child_pid}.json"
     if not parent_file.exists():
         print(f"parent has no ClaudeCount data yet: {parent_cwd}")
         return
-
     parent = json.loads(parent_file.read_text(encoding="utf-8"))
-    if child_file.exists():
-        child = json.loads(child_file.read_text(encoding="utf-8"))
-    else:
-        # Pre-link: materialize an empty project file so future Stop hooks
-        # find an existing record (and inherit the parent link).
-        child = {
-            "pid": child_pid,
-            "name": Path(child_cwd).name,
-            "cwd": child_cwd,
-            "created": datetime.now(timezone.utc).isoformat(),
-            "sessions": {},
-        }
-        recompute_project_totals(child)
-        print(f"created empty project record for {child['name']} (no sessions yet)")
-
     if parent.get("parent_pid"):
         print(f"refusing to link under '{parent.get('name')}' — it is already a "
               f"sub-project of '{parent.get('parent_name')}'. Single-level only.")
         return
 
-    child["parent_pid"]  = parent_pid
-    child["parent_name"] = parent.get("name", "")
-    save_project_data(DATA_DIR, child_pid, child)
+    linked = 0
+    for child_cwd in children:
+        child_pid = project_id(child_cwd)
+        if parent_pid == child_pid:
+            print(f"skip self-link: {child_cwd}")
+            continue
+        child_file = DATA_DIR / f"{child_pid}.json"
+        if child_file.exists():
+            child = json.loads(child_file.read_text(encoding="utf-8"))
+        else:
+            # Pre-link: materialize an empty project file so future Stop hooks
+            # find an existing record (and inherit the parent link).
+            child = {
+                "pid": child_pid,
+                "name": Path(child_cwd).name,
+                "cwd": child_cwd,
+                "created": datetime.now(timezone.utc).isoformat(),
+                "sessions": {},
+            }
+            recompute_project_totals(child)
+            print(f"created empty project record for {child['name']} (no sessions yet)")
 
-    # Mirror into status so the next render shows the parent prefix immediately.
-    status_file = STATUS_DIR / f"{child_pid}.json"
-    if status_file.exists():
-        try:
-            status = json.loads(status_file.read_text(encoding="utf-8"))
-            _attach_parent(status, child)
-            status_file.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+        child["parent_pid"]  = parent_pid
+        child["parent_name"] = parent.get("name", "")
+        save_project_data(DATA_DIR, child_pid, child)
 
-    # Re-aggregate the parent's family totals so the parent's status bar
-    # immediately reflects the new child without waiting for a Stop hook.
-    _refresh_parent_status(parent_pid)
+        status_file = STATUS_DIR / f"{child_pid}.json"
+        if status_file.exists():
+            try:
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                _attach_parent(status, child)
+                status_file.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
 
-    print(f"linked '{child.get('name')}' → parent '{parent.get('name')}'")
+        print(f"linked '{child.get('name')}' → parent '{parent.get('name')}'")
+        linked += 1
+
+    if linked:
+        # Re-aggregate the parent's family totals once after the batch so the
+        # parent's status bar immediately reflects every new child.
+        _refresh_parent_status(parent_pid)
 
 
 def unset_parent_mode(argv: list):
-    """Remove the parent link from a child project. Defaults to cwd."""
-    child_cwd = os.path.abspath(argv[0] if argv else os.getcwd())
+    """Remove the parent link from a child project. Defaults to cwd. Accepts a
+    path or a project name."""
+    child_cwd = _resolve_target(argv[0]) if argv else os.path.abspath(os.getcwd())
     child_pid = project_id(child_cwd)
     child_file = DATA_DIR / f"{child_pid}.json"
     if not child_file.exists():
@@ -1039,7 +1116,7 @@ def merge_into_parent_mode(argv: list):
     args = list(argv)
     yes = ("--yes" in args) or ("-y" in args)
     args = [a for a in args if a not in ("--yes", "-y")]
-    child_cwd = os.path.abspath(args[0] if args else os.getcwd())
+    child_cwd = _resolve_target(args[0]) if args else os.path.abspath(os.getcwd())
     child_pid = project_id(child_cwd)
     child_file = DATA_DIR / f"{child_pid}.json"
     if not child_file.exists():
@@ -1129,6 +1206,31 @@ def merge_into_parent_mode(argv: list):
     print(msg)
 
 
+def list_projects_mode():
+    """Machine-readable list of every tracked project. Used by the set-parent
+    skill to show candidates. One line per project, tab-separated:
+        <name>\\t<parent_name or "-">\\t<cost>\\t<cwd>
+    Sorted by cost descending, parents before sub-projects of the same family.
+    """
+    if not DATA_DIR.exists():
+        return
+    rows = []
+    for f in sorted(DATA_DIR.glob("*.json")):
+        try:
+            p = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rows.append((
+            p.get("name") or "?",
+            p.get("parent_name") or "-",
+            float(p.get("project_total_cost") or 0),
+            p.get("cwd") or "",
+        ))
+    rows.sort(key=lambda r: -r[2])
+    for name, parent, cost, cwd in rows:
+        print(f"{name}\t{parent}\t{cost:.2f}\t{cwd}")
+
+
 def import_mode(argv: list):
     """Adopt sessions that pre-date ClaudeCount: scan
     ~/.claude/projects/<encoded-cwd>/*.jsonl and import any session not yet in
@@ -1215,6 +1317,9 @@ def main():
     if "--import" in sys.argv:
         import_mode(sys.argv[sys.argv.index("--import") + 1:])
         return
+    if "--list-projects" in sys.argv:
+        list_projects_mode()
+        return
     if "--set-parent" in sys.argv:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1265,7 +1370,15 @@ def main():
     # window_size comes from the stored status written by render_mode with live Claude Code data.
     # The dict is a last-resort fallback only — runtime data is authoritative.
     current_model = last_model or model
-    pid = project_id(cwd)
+    pid = resolve_pid_for_cwd(cwd)
+    # If we rolled up to a tracked ancestor, the project's identity (name/cwd)
+    # belongs to that ancestor — don't overwrite it with the deeper subdir.
+    if pid != project_id(cwd):
+        try:
+            anc = json.loads((DATA_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+            cwd = anc.get("cwd") or cwd
+        except Exception:
+            pass
     stored_status = {}
     try:
         stored_status = json.loads((STATUS_DIR / f"{pid}.json").read_text(encoding="utf-8"))

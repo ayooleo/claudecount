@@ -11,13 +11,32 @@ STATUS_DIR="$HOME/.claude/token_usage/status"
 LIVE=$(cat)
 
 PID=$(printf '%s' "$LIVE" | python3 -c '
-import sys, json, hashlib
+import sys, json, hashlib, os
 try:
     d = json.load(sys.stdin)
     # Prefer top-level cwd (session startup dir, fixed for the session lifetime)
     # over workspace.current_dir (which may track the shell cwd if it drifts).
     cwd = d.get("cwd") or (d.get("workspace") or {}).get("current_dir") or ""
-    print(hashlib.md5(cwd.encode()).hexdigest()[:12] if cwd else "")
+    if not cwd:
+        print(""); sys.exit(0)
+    proj_dir = os.path.expanduser("~/.claude/token_usage/projects")
+    def pid_for(p):
+        return hashlib.md5(p.encode()).hexdigest()[:12]
+    own = pid_for(cwd)
+    # Mirror Python resolve_pid_for_cwd: own record wins; else walk up to first
+    # tracked ancestor; else fall back to own pid.
+    if os.path.isfile(os.path.join(proj_dir, own + ".json")):
+        print(own); sys.exit(0)
+    cur = os.path.abspath(cwd)
+    while True:
+        par = os.path.dirname(cur)
+        if not par or par == cur:
+            break
+        cand = pid_for(par)
+        if os.path.isfile(os.path.join(proj_dir, cand + ".json")):
+            print(cand); sys.exit(0)
+        cur = par
+    print(own)
 except Exception:
     print("")
 ' 2>/dev/null)

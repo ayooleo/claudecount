@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](#更新日志)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#更新日志)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 为 Claude Code（终端版）提供实时 token 用量与花费统计，直接显示在状态栏里。
@@ -181,6 +181,16 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.2.0] — 2026-05-07
+
+**新增**
+- pid 自动归属（auto-rollup）：进入已有 project 的未追踪子目录时，不再创建新的顶层 project 记录。Stop / SessionStart / UserPromptSubmit hook 和 `token_status.sh` 都会沿目录向上找到第一个已追踪的祖先 project，把活动归到它名下。已经有自己 record 的子目录 project 依然各自记账；想把它们整体并入父项目用 `--merge-into-parent`，想保留独立追踪同时显示在父项目下面用 `--set-parent`
+- `--set-parent` 现在同时支持**项目名**与路径，支持**批量**挂接：`--set-parent ginzok-online Ginweb server projects` 一次把三个子项目挂到同一个父项目下
+- 新增 `--list-projects` 子命令：输出 tab 分隔的候选清单（`name<TAB>parent<TAB>cost<TAB>cwd`），供 `claudecount-set-parent` skill 列出候选项目
+
+**变更**
+- `claudecount-set-parent` skill 重写：触发模式覆盖正反两种说法（"把 X 挂到 Y 下" / "在这里把 X 设为子项目"），支持批量与按项目名引用；意图不明时先走一步 `--list-projects` 列候选
 
 ### [1.1.0] — 2026-04-29
 
