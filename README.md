@@ -1,6 +1,6 @@
 # ClaudeCount
 
-**English** | [简体中文](./README.zh-CN.md)
+English | [简体中文](./README.zh-CN.md)
 
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#changelog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,7 +8,7 @@
 Real-time token usage and cost tracking for Claude Code (Terminal), shown directly in the status bar.
 
 ```
-MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% │ Turn: $0.03 (↑180k ↓450 179k «) │ Sess: $0.18 (↑180k ↓450 179k «, 5 turns, 12 min) │ Proj: $2.40 (↑18M ↓62k 17M «, 5 sess, 40 turns, 3hr)
+MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k ↓450 179k «) │ Sess: $0.18 (↑180k ↓450 179k «, 5 turns, 12 min) │ Proj: $2.40 (↑18M ↓62k 17M «, 5 sess, 40 turns, 3hr)
 ```
 
 | Segment | Meaning |
@@ -17,6 +17,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% │ Turn: $0.03 (↑180k ↓450 1
 | **Model** | Current model name and context window size |
 | **🌡️ %** | Context window fill — green < 50%, blue 50–74%, yellow 75–89%, red ≥ 90% |
 | **🎯 %** | Session cache hit rate (`cache_read` / total input) — orange < 50%, yellow 50–74%, blue 75–89%, green ≥ 90%; hidden until the session has any input |
+| **🎫 N** | Project-total token consumption (input + output + cache_read + cache_creation summed). For parent projects: family aggregate (parent + every child); for standalone and sub-projects: their own total |
 | **Turn** | Cost + tokens for the last completed turn (all API calls summed) |
 | **Sess** | Cumulative cost, tokens, turn count, and active time for this session |
 | **Proj** | All-time cost, tokens, session count, total turns, and active hours |
@@ -96,7 +97,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 Single-level only — a parent can't itself have a parent. Once linked:
 
-- **When opened in the parent directory**, the status bar becomes multi-line: the parent's full stats (🌡️ context %, 🎯 cache hit, Turn, Sess, Proj family aggregate) occupy line 1; each child with non-zero spend gets its own compact row below (`  › Name  Sub: $cost (tokens, sessions, turns, time)`), sorted by cost. Children with $0.00 stay hidden. **When opened in a sub-project directory**, the status bar remains a single line showing the sub-project's own stats
+- **When opened in the parent directory**, the status bar becomes multi-line: the parent's full stats (🌡️ context %, 🎯 cache hit, 🎫 family-total tokens, Turn, Sess, Proj family aggregate) occupy line 1; each child with non-zero spend gets its own compact row below (`  › Name  Sub: $cost (tokens, sessions, turns, time)`), sorted by cost. Children with $0.00 stay hidden. **When opened in a sub-project directory**, the status bar remains a single line showing the sub-project's own stats
 - The sub-project's status bar header reads `parent › CHILD`; its third segment is relabelled `Sub:` (instead of `Proj:`) and shows the sub-project's own totals
 - The parent's status bar `Proj:` segment becomes a **family aggregate** — its cost, tokens, session count, turns and active time are summed across the parent and every child. Updated automatically: a child's Stop hook also refreshes the parent's status, so the parent's bar reflects the latest family numbers without waiting for its own Stop
 - `Sess:` and `Turn:` are never aggregated — you can only be in one session at a time
@@ -188,6 +189,7 @@ This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Kee
 - Auto-rollup pid resolution: cd-ing into an untracked subdirectory of an existing project no longer creates a new top-level project record. The Stop / SessionStart / UserPromptSubmit hooks and `token_status.sh` walk up the directory tree and attribute activity to the nearest tracked ancestor. Pre-existing subdir projects (with their own record) keep accumulating to themselves; use `--merge-into-parent` to consolidate after the fact, or `--set-parent` to keep a subdir tracked separately *and* shown under its parent
 - `--set-parent` now accepts project **names** in addition to paths, and supports **batch** linking: `--set-parent ginzok-online Ginweb server projects` mounts three children under one parent in a single call
 - `--list-projects` mode: tab-separated machine-readable list (`name<TAB>parent<TAB>cost<TAB>cwd`), used by the `claudecount-set-parent` skill to show candidates
+- `🎫` project-total token-consumption indicator. Appears in the status-bar header (after `🎯 cache hit`) and in `token_report` output (after `Cache reads`). Sums input + output + cache_read + cache_creation. Parent projects show the family aggregate (parent + every child); standalone and sub-projects show their own total. Recomputed each render from `projects/*.json` — no cached field, no drift
 
 **Changed**
 - `claudecount-set-parent` skill rewritten to handle both directions of natural-language phrasing ("把 X 挂到 Y 下" / "在这里把 X 设为子项目"), batch input, and name-based references — with an optional `--list-projects` pre-step when intent is ambiguous

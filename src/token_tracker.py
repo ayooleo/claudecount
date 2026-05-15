@@ -467,6 +467,19 @@ def _fmt_tok(n) -> str:
     return f"{_GRY}{n}{_R}"
 
 
+def _total_tokens(t: dict) -> int:
+    """Sum of all four token kinds (input + output + cache_read + cache_creation).
+    Accepts either project-file shape (`cache_*_input_tokens`) or status-bar shape
+    (`cache_read` / `cache_creation`) — looks up both spellings so callers don't
+    have to translate. Single source of truth for the 🎫 number across CLI and
+    status bar; keep tracker and token_report.py in sync via this one function."""
+    return (
+        t.get("input_tokens", 0) + t.get("output_tokens", 0)
+        + t.get("cache_read_input_tokens", t.get("cache_read", 0))
+        + t.get("cache_creation_input_tokens", t.get("cache_creation", 0))
+    )
+
+
 def _fmt_win(size) -> str:
     if size >= 1_000_000:
         return f"{int(size/1_000_000)}M"
@@ -506,7 +519,7 @@ def _tok_triplet(d: dict) -> str:
     return f"{_GRY}↑{_R}{_fmt_tok(total_in)} {_GRY}↓{_R}{_fmt_tok(d.get('output_tokens', 0))}{cache_str}"
 
 
-def _render_header(status: dict) -> str:
+def _render_header(status: dict, proj_tok_total: int = 0) -> str:
     name = (status.get("project_name") or status.get("cwd", "").split("/")[-1] or "PROJ").upper()
     model = fmt_model(status.get("model", ""))
     parent_name = status.get("parent_name", "")
@@ -531,7 +544,10 @@ def _render_header(status: dict) -> str:
         cw_str = ""
     hit_pct, hit_color = _cache_hit_rate(status.get("session", {}))
     hit_str = f" 🎯 {hit_color}{hit_pct}%{_R}" if hit_pct is not None else ""
-    return header + f" {_GRY}{model}{_R}{win_str}{cw_str}{hit_str}"
+    # 🎫 = project-total token consumption. Family aggregate for parents,
+    # own total for standalone/sub-projects. Caller pre-computes the int.
+    tok_str = f" 🎫 {_fmt_tok(proj_tok_total)}" if proj_tok_total else ""
+    return header + f" {_GRY}{model}{_R}{win_str}{cw_str}{hit_str}{tok_str}"
 
 
 def _render_turn_segment(t: dict) -> str:
@@ -572,18 +588,7 @@ def _render_child_row(child_project: dict) -> str:
     Shows only the child's own aggregate — no 🌡️/🎯 (those are per-session
     metrics for the active parent session, not the child)."""
     name = child_project.get("name") or child_project.get("pid", "?")
-    pt = child_project.get("project_total_tokens", {})
-    proj_dict = {
-        "cost": child_project.get("project_total_cost", 0),
-        "session_count": child_project.get("session_count", 0),
-        "turn_count": child_project.get("project_total_turns", 0),
-        "active_minutes": child_project.get("project_active_minutes", 0),
-        "input_tokens":   pt.get("input_tokens", 0),
-        "cache_creation": pt.get("cache_creation_input_tokens", 0),
-        "cache_read":     pt.get("cache_read_input_tokens", 0),
-        "output_tokens":  pt.get("output_tokens", 0),
-    }
-    seg = _render_proj_segment(proj_dict, "Sub")
+    seg = _render_proj_segment(_own_proj_segment(child_project), "Sub")
     return f"  {_GRY}›{_R} {_GRY}{name}{_R}  {seg}"
 
 
@@ -634,14 +639,28 @@ def render_status_line(status: dict) -> str:
             reverse=True,
         )
 
-    header   = _render_header(status)
+    # Pre-compute family token total for the 🎫 header segment. Only invoke
+    # _live_family_totals when `project_own` is present — on legacy parent
+    # status files (written before the project_own / project split), `project`
+    # already holds the family aggregate, so re-adding children would
+    # double-count. The fallback path uses status["project"] verbatim, which
+    # is correct for: standalone (own), sub-projects (own), and legacy
+    # parents (already family).
+    if all_children and "project_own" in status:
+        live_family = _live_family_totals(status["project_own"], all_children)
+    else:
+        live_family = None
+    proj_for_tokens = live_family if live_family is not None else status.get("project", {})
+    proj_tok_total = _total_tokens(proj_for_tokens)
+
+    header   = _render_header(status, proj_tok_total)
     turn_seg = _render_turn_segment(status.get("last_turn", {}))
     sess_seg = _render_sess_segment(status.get("session", {}))
 
     if visible_children and "project_own" in status:
         own = status["project_own"]
         sub_cost   = sum(c.get("project_total_cost", 0) for c in all_children)
-        live_total = _live_family_totals(own, all_children)
+        live_total = live_family  # already computed above
         # self / sub are metadata appended inside Proj's parenthetical,
         # not separated by │ — they're stats of the same Proj segment.
         extra = [
@@ -841,8 +860,10 @@ def render_mode(argv: list):
             current_json = Path(status_path).parent / "current.json"
             if Path(status_path).resolve() != current_json.resolve():
                 current_json.write_text(status_json, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            # stderr is separate from the status-bar stdout, so this won't
+            # corrupt the bar — but it does surface broken status dirs etc.
+            print(f"claudecount: render write failed: {e}", file=sys.stderr)
 
     print(render_status_line(status), end="")
 

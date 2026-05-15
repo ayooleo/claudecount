@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Reuse model resolution / project-id logic from the tracker (deployed alongside)
 sys.path.insert(0, str(Path(__file__).parent))
-from token_tracker import fmt_model, project_id, _legacy_view, recompute_project_totals  # noqa: E402
+from token_tracker import fmt_model, project_id, _legacy_view, recompute_project_totals, _total_tokens  # noqa: E402
 
 
 def fmt_cost(c: float) -> str:
@@ -72,7 +72,6 @@ def print_project(p: dict, verbose: bool = False, children: list = None):
     total_cost = p.get("project_total_cost", 0)
     total_tok = p.get("project_total_tokens", {})
     session_count = p.get("session_count", 0)
-    active_days = p.get("active_days", 0)
     last_updated = p.get("last_updated", "")
     model = p.get("last_model", "")
 
@@ -102,6 +101,19 @@ def print_project(p: dict, verbose: bool = False, children: list = None):
     cache_read = total_tok.get("cache_read_input_tokens", 0)
     if cache_read:
         print(f"  Cache reads   : {fmt_tok(cache_read)}  (cost saved)")
+    # Project-total token consumption. Always shown. For parent projects: own
+    # + every child's project_total_tokens (each recomputed from sessions +
+    # legacy in load_all_projects → recompute_project_totals, so it can't
+    # drift). Standalone / sub-projects: just own. Uses _total_tokens from
+    # tracker — single source of truth shared with the 🎫 status-bar segment.
+    proj_tok = _total_tokens(total_tok)
+    if children:
+        proj_tok += sum(_total_tokens(c.get("project_total_tokens", {})) for c in children)
+        n_sub = len(children)
+        suffix = f"  (parent + {n_sub} sub-project{'s' if n_sub != 1 else ''})"
+    else:
+        suffix = ""
+    print(f"  🎫 Project tokens: {fmt_tok(proj_tok)}{suffix}")
     if legacy:
         period = ""
         ps, pe = legacy.get("period_start", ""), legacy.get("period_end", "")
@@ -142,7 +154,7 @@ def print_project(p: dict, verbose: bool = False, children: list = None):
         sessions = p.get("sessions", {})
         if sessions:
             print(f"\n  Session breakdown:")
-            for sid, s in sorted(sessions.items(), key=lambda x: x[1].get("started", x[1].get("updated", ""))):
+            for _, s in sorted(sessions.items(), key=lambda x: x[1].get("started", x[1].get("updated", ""))):
                 ts = (s.get("started") or s.get("updated", ""))[:19]
                 toks = s.get("tokens", {})
                 sess_model = fmt_model(s.get("model", ""))

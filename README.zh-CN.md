@@ -1,6 +1,6 @@
 # ClaudeCount
 
-[English](./README.md) | **简体中文**
+[English](./README.md) | 简体中文
 
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#更新日志)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,7 +8,7 @@
 为 Claude Code（终端版）提供实时 token 用量与花费统计，直接显示在状态栏里。
 
 ```
-MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% │ Turn: $0.03 (↑180k ↓450 179k «) │ Sess: $0.18 (↑180k ↓450 179k «, 5 turns, 12 min) │ Proj: $2.40 (↑18M ↓62k 17M «, 5 sess, 40 turns, 3hr)
+MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k ↓450 179k «) │ Sess: $0.18 (↑180k ↓450 179k «, 5 turns, 12 min) │ Proj: $2.40 (↑18M ↓62k 17M «, 5 sess, 40 turns, 3hr)
 ```
 
 | 字段 | 含义 |
@@ -17,6 +17,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% │ Turn: $0.03 (↑180k ↓450 1
 | **Model** | 当前模型名称与上下文窗口大小 |
 | **🌡️ %** | 上下文窗口占用率 —— 绿 < 50%，蓝 50–74%，黄 75–89%，红 ≥ 90% |
 | **🎯 %** | 本次会话缓存命中率（`cache_read` / 总输入）—— 橙 < 50%，黄 50–74%，蓝 75–89%，绿 ≥ 90%；会话尚无输入时不显示 |
+| **🎫 N** | 项目级 token 总消耗（input + output + cache_read + cache_creation 之和）。父项目显示家庭合计（父 + 全部子项目），独立项目和子项目显示自身合计 |
 | **Turn** | 上一轮已完成对话的花费 + token（所有 API 调用累加） |
 | **Sess** | 本次会话累计的花费、token、轮数、活跃时长 |
 | **Proj** | 本项目累计的花费、token、会话数、总轮数、活跃时长 |
@@ -96,7 +97,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 仅支持一层 —— 父项目本身不能再有父项目。关联建立后：
 
-- **在父项目目录打开 Claude Code 时**，状态栏变为多行：第一行是父项目完整统计（🌡️ 上下文占用、🎯 缓存命中、Turn、Sess、Proj 家庭合计）；每个有花费的子项目在下方各占一行（`  › 名称  Sub: $cost (tokens, sessions, turns, time)`），按花费降序排列。花费为 $0.00 的子项目不显示。**在子项目目录打开时**，状态栏仍为单行，显示子项目自己的完整信息
+- **在父项目目录打开 Claude Code 时**，状态栏变为多行：第一行是父项目完整统计（🌡️ 上下文占用、🎯 缓存命中、🎫 家庭 token 合计、Turn、Sess、Proj 家庭合计）；每个有花费的子项目在下方各占一行（`  › 名称  Sub: $cost (tokens, sessions, turns, time)`），按花费降序排列。花费为 $0.00 的子项目不显示。**在子项目目录打开时**，状态栏仍为单行，显示子项目自己的完整信息
 - 子项目的状态栏 header 显示 `parent › CHILD`，第三段从 `Proj:` 改为 `Sub:`（含义：本子项目自身用量）
 - 父项目的状态栏 `Proj:` 段升级为**家庭合计**——cost、tokens、会话数、轮数、活跃时长全部跨父 + 全部子项目累加。自动更新：子项目每次 Stop hook 触发后会顺手刷新父项目状态，父状态栏始终反映最新家庭合计，不必等父项目自己的 Stop
 - `Sess:` 和 `Turn:` 永远不做家庭聚合 —— 同一时刻你只能在一个会话里
@@ -188,6 +189,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 - pid 自动归属（auto-rollup）：进入已有 project 的未追踪子目录时，不再创建新的顶层 project 记录。Stop / SessionStart / UserPromptSubmit hook 和 `token_status.sh` 都会沿目录向上找到第一个已追踪的祖先 project，把活动归到它名下。已经有自己 record 的子目录 project 依然各自记账；想把它们整体并入父项目用 `--merge-into-parent`，想保留独立追踪同时显示在父项目下面用 `--set-parent`
 - `--set-parent` 现在同时支持**项目名**与路径，支持**批量**挂接：`--set-parent ginzok-online Ginweb server projects` 一次把三个子项目挂到同一个父项目下
 - 新增 `--list-projects` 子命令：输出 tab 分隔的候选清单（`name<TAB>parent<TAB>cost<TAB>cwd`），供 `claudecount-set-parent` skill 列出候选项目
+- `🎫` 项目级 token 总消耗指示器，同时出现在状态栏 header（`🎯 缓存命中` 后面）和 `token_report` 报告（`Cache reads` 后面）。计算口径为 input + output + cache_read + cache_creation。父项目显示家庭合计（父 + 全部子项目），独立项目和子项目显示自身合计。每次渲染从 `projects/*.json` 实时聚合，无缓存字段，不会过期
 
 **变更**
 - `claudecount-set-parent` skill 重写：触发模式覆盖正反两种说法（"把 X 挂到 Y 下" / "在这里把 X 设为子项目"），支持批量与按项目名引用；意图不明时先走一步 `--list-projects` 列候选
