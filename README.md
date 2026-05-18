@@ -2,7 +2,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](#changelog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Real-time token usage and cost tracking for Claude Code (Terminal), shown directly in the status bar.
@@ -60,6 +60,20 @@ python3 ~/.claude/hooks/token_report.py --all
 # All projects + session-level detail
 python3 ~/.claude/hooks/token_report.py --all -v
 ```
+
+## Starting tracking on a project
+
+Tracking starts automatically the first time a Stop hook fires in a directory — you don't normally need to do anything. The exception is when you're inside a subdirectory of an already-tracked project and want this subdir tracked as its **own** top-level project (instead of rolling up into the parent). Use `--init`:
+
+```bash
+# From the project directory
+python3 ~/.claude/hooks/token_tracker.py --init
+
+# Or point at any path
+python3 ~/.claude/hooks/token_tracker.py --init /path/to/project
+```
+
+Idempotent — re-running on an already-tracked project is a no-op. If past Claude Code transcripts are on disk for this project, `--init` reports the count on a second line (`available_transcripts: N`) so you know there's history available to import.
 
 ## Adopting an older project
 
@@ -182,6 +196,15 @@ Prices are per million tokens. **Opus 4.7 / 4.6** and **Sonnet 4.6** support a 1
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.2.1] — 2026-05-18
+
+**Added**
+- `--init` mode: lightweight one-shot CLI to start tracking a project. Creates an empty top-level project record at the target path (cwd by default) so future Stop hooks bind to it instead of auto-rolling-up into a tracked ancestor. Idempotent. Reports `available_transcripts: N` on a second line when on-disk Claude Code transcripts are not yet imported — caller decides whether to invoke `--import`
+- `claudecount-init` skill: invoke via `/claudecount-init` or natural-language triggers ("init claudecount", "start tracking this project", "把这个项目加入 ClaudeCount", "初始化 claudecount"). Runs `--init`, then prompts the user before importing past transcripts if any are available
+
+**Changed**
+- Previously, the only way to materialise a project record on demand was `--set-parent`, which forced the user to also pick a parent — overkill when the goal is just "track this folder as its own top-level project". `--init` is now the dedicated entry point
 
 ### [1.2.0] — 2026-05-07
 

@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -446,7 +446,6 @@ _YLW  = "\033[38;5;220m"
 _GRN  = "\033[38;5;120m"
 _BLU  = "\033[38;5;111m"
 _GRY  = "\033[38;5;183m"
-_DIM  = "\033[38;5;242m"   # darker neutral gray — secondary / auxiliary stats
 _RED  = "\033[38;5;203m"
 _SEP  = f"{_GRY} │ {_R}"
 
@@ -1252,6 +1251,54 @@ def list_projects_mode():
         print(f"{name}\t{parent}\t{cost:.2f}\t{cwd}")
 
 
+def init_mode(argv: list):
+    """Create an empty top-level project record for a working directory so
+    future Stop hooks track it as its own project (bypassing auto-rollup into
+    a tracked ancestor). Idempotent — re-running on an already-tracked project
+    is a no-op and the existing record is left untouched.
+
+    Reports how many on-disk transcripts are available but **not yet imported**,
+    so the caller (typically the `claudecount-init` skill) can prompt the user
+    before running `--import`. This CLI never imports on its own.
+
+    Usage:
+      --init           # cwd
+      --init <path>    # explicit project root
+    """
+    cwd = os.path.abspath(argv[0]) if argv else os.path.abspath(os.getcwd())
+    pid = project_id(cwd)
+    project_file = DATA_DIR / f"{pid}.json"
+
+    if project_file.exists():
+        try:
+            project = json.loads(project_file.read_text(encoding="utf-8"))
+        except Exception:
+            project = {"name": Path(cwd).name, "sessions": {}}
+        print(f"already tracked: {project.get('name') or Path(cwd).name}")
+    else:
+        project = {
+            "pid": pid,
+            "name": Path(cwd).name,
+            "cwd": cwd,
+            "created": datetime.now(timezone.utc).isoformat(),
+            "sessions": {},
+        }
+        recompute_project_totals(project)
+        save_project_data(DATA_DIR, pid, project)
+        print(f"initialized project: {project['name']} ({cwd})")
+
+    encoded = cwd.replace("/", "-")
+    transcripts_dir = Path.home() / ".claude" / "projects" / encoded
+    available = 0
+    if transcripts_dir.exists():
+        tracked = set(project.get("sessions", {}).keys())
+        for transcript in transcripts_dir.glob("*.jsonl"):
+            if transcript.stem not in tracked:
+                available += 1
+    if available:
+        print(f"available_transcripts: {available}")
+
+
 def import_mode(argv: list):
     """Adopt sessions that pre-date ClaudeCount: scan
     ~/.claude/projects/<encoded-cwd>/*.jsonl and import any session not yet in
@@ -1334,6 +1381,11 @@ def main():
         return
     if "--backfill" in sys.argv:
         backfill_mode()
+        return
+    if "--init" in sys.argv:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        init_mode(sys.argv[sys.argv.index("--init") + 1:])
         return
     if "--import" in sys.argv:
         import_mode(sys.argv[sys.argv.index("--import") + 1:])

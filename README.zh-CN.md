@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#更新日志)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](#更新日志)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 为 Claude Code（终端版）提供实时 token 用量与花费统计，直接显示在状态栏里。
@@ -60,6 +60,20 @@ python3 ~/.claude/hooks/token_report.py --all
 # 所有项目 + session 级明细
 python3 ~/.claude/hooks/token_report.py --all -v
 ```
+
+## 显式初始化追踪
+
+一般情况下，进入任意目录运行 Claude Code，第一次 Stop hook 触发时就会自动登记。**例外情况**是：当前目录是已追踪项目的子目录，但你希望它作为**独立的顶层项目**单独统计（而不是被 auto-rollup 归并到父项目）。此时用 `--init` 显式建档：
+
+```bash
+# 在项目根目录执行
+python3 ~/.claude/hooks/token_tracker.py --init
+
+# 或指定任意路径
+python3 ~/.claude/hooks/token_tracker.py --init /path/to/project
+```
+
+幂等 —— 对已追踪项目重跑是 no-op。如果磁盘上已有此项目的历史 transcript，`--init` 会在第二行输出 `available_transcripts: N`，提醒可用 `--import` 接管。
 
 ## 接管旧项目
 
@@ -182,6 +196,15 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.2.1] — 2026-05-18
+
+**新增**
+- `--init` 子命令：轻量级一次性 CLI，用来显式开始追踪一个项目。在目标路径（默认 cwd）创建空的顶层 project record，让后续 Stop hook 落到这里而不是被 auto-rollup 归并到祖先项目。幂等。如果磁盘上还有未导入的 Claude Code transcript，会在第二行输出 `available_transcripts: N`，由调用方决定要不要跑 `--import`
+- `claudecount-init` skill：可通过 `/claudecount-init` 或自然语言触发（"init claudecount" / "start tracking this project" / "把这个项目加入 ClaudeCount" / "初始化 claudecount"）。流程是先跑 `--init`，若发现有可导入的 transcript 再询问用户是否一并导入
+
+**变更**
+- 此前要手动建立一份 project record 的唯一办法是 `--set-parent`，但这会强行要求用户同时指定一个父项目 —— 对于"只想把当前目录作为独立顶层项目追踪"这一意图明显过重。`--init` 现在是这一场景的专用入口
 
 ### [1.2.0] — 2026-05-07
 
