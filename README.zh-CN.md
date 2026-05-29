@@ -174,7 +174,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 | 模型 | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |------|-------|--------|----------------|----------------|------------|
-| Opus 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
+| Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
@@ -183,7 +183,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-价格按每百万 token 计。**Opus 4.7 / 4.6** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+价格按每百万 token 计。**Opus 4.8 / 4.7 / 4.6** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
 
 ## 数据存储位置
 

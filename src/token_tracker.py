@@ -41,9 +41,10 @@ def _is_assistant(msg: dict) -> bool:
 #   cache_write_5m = ephemeral 5-min tier (1.25× input)
 #   cache_write_1h = ephemeral 1-hr tier   (2×    input)
 #   cache_read     =                       (0.1×  input)
-# 1M context: Opus 4.7 / 4.6, Sonnet 4.6. All other models 200K.
+# 1M context: Opus 4.8 / 4.7 / 4.6, Sonnet 4.6. All other models 200K.
 MODELS = {
     # Claude 4 family
+    "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.8"},
     "claude-opus-4-7":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.7"},
     "claude-opus-4-6":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.6"},
     "claude-opus-4-5":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context":   200_000, "name": "Opus 4.5"},

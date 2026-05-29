@@ -174,7 +174,7 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 
 | Model | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |-------|-------|--------|----------------|----------------|------------|
-| Opus 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
+| Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
@@ -183,7 +183,7 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-Prices are per million tokens. **Opus 4.7 / 4.6** and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+Prices are per million tokens. **Opus 4.8 / 4.7 / 4.6** and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
 
 ## Data location
 
