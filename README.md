@@ -2,7 +2,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](#changelog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Real-time token usage and cost tracking for Claude Code (Terminal), shown directly in the status bar.
@@ -18,8 +18,8 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 | **🌡️ %** | Context window fill — green < 50%, blue 50–74%, yellow 75–89%, red ≥ 90% |
 | **🎯 %** | Session cache hit rate (`cache_read` / total input) — orange < 50%, yellow 50–74%, blue 75–89%, green ≥ 90%; hidden until the session has any input |
 | **🎫 N** | Project-total token consumption (input + output + cache_read + cache_creation summed). For parent projects: family aggregate (parent + every child); for standalone and sub-projects: their own total |
-| **Turn** | Cost + tokens for the last completed turn (all API calls summed) |
-| **Sess** | Cumulative cost, tokens, turn count, and active time for this session |
+| **Turn** | Cost + tokens for the last completed turn (all API calls summed, including any subagents that ran during it) |
+| **Sess** | Cumulative cost, tokens, turn count, and active time for this session (includes subagent / Task-tool spend) |
 | **Proj** | All-time cost, tokens, session count, total turns, and active hours |
 
 ### Token notation
@@ -157,6 +157,7 @@ Three hooks cooperate to keep the display accurate:
 **Stop hook** (async) fires after each Claude response:
 - Reads the session transcript and deduplicates API calls (one response can span multiple transcript entries)
 - Counts real human turns (tool-result messages are excluded)
+- Folds in **subagent (Task tool) spend** — Claude Code stores each subagent run in a separate `<session_id>/subagents/agent-*.jsonl` file that is absent from the main transcript, so its tokens are read and added to Sess/Proj totals (and to Turn for subagents that ran during the last turn)
 - Calculates Turn, Sess, and Proj costs and token totals
 - Writes `~/.claude/token_usage/status/current.json`
 
@@ -165,6 +166,7 @@ Three hooks cooperate to keep the display accurate:
 - Model name updates immediately when you switch models with `/model`
 - Context window **size** is taken from Claude Code's live `context_window_size` (so 1M variants opt-ins are picked up correctly); the built-in model table is a fallback only
 - Context window **percentage** is recomputed locally from `current_usage` over the live window size, using the same input-only formula Claude Code uses (`input + cache_creation + cache_read`, output excluded)
+- It **never resets Turn/Sess on its own.** The status line's `session_id` is not always the id the Stop hook keys on — with Claude Code background sessions and per-session git worktrees, the foreground status line reports one session while the working/Stop session is another, yet both map to the same tracked project. Session resets are owned solely by the SessionStart / UserPromptSubmit hooks (which share the working session id), so the bar reflects real-time Turn/Sess instead of flickering back to zero
 
 **Active time** counts the total time when human and AI are collaborating: it sums all inter-message gaps (both sides) up to 3 minutes. Gaps longer than 3 minutes — idle pauses, away-from-screen periods, unanswered permission prompts — are excluded.
 
@@ -174,6 +176,7 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 
 | Model | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |-------|-------|--------|----------------|----------------|------------|
+| Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
@@ -183,7 +186,7 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-Prices are per million tokens. **Opus 4.8 / 4.7 / 4.6** and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+Prices are per million tokens. **Fable 5 / Mythos 5**, **Opus 4.8 / 4.7 / 4.6**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-06-26. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
 
 ## Data location
 
@@ -196,6 +199,16 @@ Prices are per million tokens. **Opus 4.8 / 4.7 / 4.6** and **Sonnet 4.6** suppo
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.3.0] — 2026-06-26
+
+**Fixed**
+- **Turn / Sess no longer freeze on the status bar during background sessions.** Claude Code background sessions and per-session git worktrees make the status line's `session_id` differ from the id the Stop hook records (both still resolve to the same tracked project). `render_mode`'s session-change self-heal treated that mismatch as a brand-new session and zeroed Turn/Sess on every 30s render, so the bar appeared stuck. Render no longer resets on a `session_id` mismatch — session resets are owned solely by the SessionStart / UserPromptSubmit hooks, which share the working session id with the Stop hook
+- `--import` / `--init` now find transcripts for project paths that contain **spaces or dots** (e.g. `NCARB Study/app`). Claude Code encodes its transcript directory by replacing every non-alphanumeric character with `-`, not just `/`; the previous `/`→`-`-only encoding silently missed those paths
+
+**Added**
+- **Subagent (Task tool) cost accounting.** Claude Code stores each subagent run in a separate `<session_id>/subagents/agent-*.jsonl` file that is absent from the main transcript, so subagent tokens were previously uncounted — under-reporting cost for subagent-heavy sessions. The Stop hook (and `--import`) now read those files and fold their per-model spend into Sess / Proj totals, and into Turn for subagents that ran during the last turn. Active sessions pick up the corrected totals on their next Stop; previously-imported historical sessions are unchanged unless re-imported
+- **Claude Fable 5** (`claude-fable-5`) and **Claude Mythos 5** (`claude-mythos-5`) pricing — $10 / $50 per Mtok, 1M context (cache write 5m $12.50 / 1h $20.00, cache read $1.00). Verified against the platform.claude.com catalog on 2026-06-26
 
 ### [1.2.1] — 2026-05-18
 

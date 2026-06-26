@@ -4,11 +4,12 @@
 import json
 import sys
 import os
+import re
 import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -43,6 +44,10 @@ def _is_assistant(msg: dict) -> bool:
 #   cache_read     =                       (0.1×  input)
 # 1M context: Opus 4.8 / 4.7 / 4.6, Sonnet 4.6. All other models 200K.
 MODELS = {
+    # Claude 5 family (Fable / Mythos) — most capable; 1M context. Verified 2026-06-26
+    # against the platform.claude.com model catalog ($10 / $50 per MTok).
+    "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Fable 5"},
+    "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Mythos 5"},
     # Claude 4 family
     "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.8"},
     "claude-opus-4-7":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.7"},
@@ -136,6 +141,16 @@ def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
 
 def project_id(cwd: str) -> str:
     return hashlib.md5(cwd.encode()).hexdigest()[:12]
+
+
+def encode_project_dir(cwd: str) -> str:
+    """Encode a cwd to Claude Code's transcript directory name under
+    ~/.claude/projects/<encoded>/. Claude Code replaces every non-alphanumeric
+    character with '-', NOT just '/': spaces and dots are replaced too, so
+    '/home/u/NCARB Study/app' → '-home-u-NCARB-Study-app'. The previous
+    '/'→'-'-only form silently broke --import / --init for paths with spaces or
+    dots. Verified against on-disk transcript dirs 2026-06-26."""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
 def resolve_pid_for_cwd(cwd: str) -> str:
@@ -282,6 +297,71 @@ def get_last_turn_usages(messages: list) -> list:
 
 def get_all_assistant_usages(messages: list) -> list:
     return _collect_assistant_usages(messages)
+
+
+def subagent_transcript_paths(transcript_path: str) -> list:
+    """Subagent transcript files for a session, or [] if none.
+
+    Claude Code (background sessions / nested subagents, v2.1.172+) writes each
+    Task/subagent run to ~/.claude/projects/<encoded>/<session_id>/subagents/
+    agent-*.jsonl — a sibling *directory* named after the session whose .jsonl
+    transcript is `transcript_path`. Subagent token usage is NOT present in the
+    main transcript, so it must be folded in separately for accurate cost."""
+    if not transcript_path:
+        return []
+    sub_dir = Path(transcript_path).with_suffix("") / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    return sorted(sub_dir.glob("*.jsonl"))
+
+
+def _parse_ts(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
+def _first_timestamp(messages: list):
+    for m in messages:
+        dt = _parse_ts(m.get("timestamp") or m.get("created_at") or "")
+        if dt:
+            return dt
+    return None
+
+
+def last_human_timestamp(messages: list):
+    """Timestamp of the last real human message, or None — used to attribute
+    subagent spend to the current (last) turn."""
+    last = None
+    for m in messages:
+        if _is_user(m) and is_human_message(m):
+            dt = _parse_ts(m.get("timestamp") or m.get("created_at") or "")
+            if dt:
+                last = dt
+    return last
+
+
+def collect_subagent_usages(transcript_path: str, since=None) -> list:
+    """Deduplicated (usage, model) pairs across all of a session's subagent
+    transcripts. If `since` (an aware datetime) is given, include only subagents
+    whose first message is at or after that time — used to fold subagent spend
+    into the current turn. Usage is deduped per-file; subagent calls never appear
+    in the main transcript, so no cross-file dedup is needed."""
+    out = []
+    for p in subagent_transcript_paths(transcript_path):
+        msgs = read_transcript(str(p))
+        if not msgs:
+            continue
+        if since is not None:
+            first = _first_timestamp(msgs)
+            if first is None or first < since:
+                continue
+        out.extend(get_all_assistant_usages(msgs))
+    return out
 
 
 def sum_usages(usages: list, price_override: dict = None) -> tuple:
@@ -772,10 +852,14 @@ def render_mode(argv: list):
     is reflected for other consumers (token_report, next Stop hook, etc.) without
     waiting for the next assistant message.
 
-    Self-heals on session change: if the live session_id from Claude Code differs
-    from what's stored, run the same reset that SessionStart/UserPromptSubmit hooks
-    do. Guarantees a fresh Turn/Sess display the moment a new session opens, even
-    if those hooks aren't wired.
+    Does NOT reset Turn/Sess on a session_id mismatch. The statusLine session_id
+    is not guaranteed to equal the id the Stop hook keys on: with Claude Code
+    background sessions and per-session git worktrees (which roll up to the same
+    tracked pid), the foreground statusLine reports one session while the Stop
+    hook records another. The old self-heal treated that mismatch as a new session
+    and zeroed Turn/Sess on every render, so the bar appeared frozen at 0. Session
+    resets are owned solely by the SessionStart / UserPromptSubmit hooks, which
+    share the working session_id with the Stop hook (see _reset_session_state).
     """
     if len(argv) < 1:
         print("💰 --")
@@ -789,19 +873,9 @@ def render_mode(argv: list):
     except Exception:
         status = {}
 
-    live_session_id = live.get("session_id")
-    live_cwd = (live.get("cwd")
-                or (live.get("workspace") or {}).get("current_dir")
-                or "")
-    stored_sid = status.get("session_id", "")
-    if (live_session_id and live_cwd
-            and stored_sid and stored_sid != live_session_id):
-        _reset_session_state(live_session_id, live_cwd)
-        try:
-            status = json.loads(Path(status_path).read_text(encoding="utf-8"))
-        except Exception:
-            status = {}
-
+    # No session reset here — see the docstring. SessionStart / UserPromptSubmit
+    # own resets (they share the working session_id with the Stop hook). render
+    # only merges live model/context below.
     if not status:
         print("💰 --")
         return
@@ -1288,7 +1362,7 @@ def init_mode(argv: list):
         save_project_data(DATA_DIR, pid, project)
         print(f"initialized project: {project['name']} ({cwd})")
 
-    encoded = cwd.replace("/", "-")
+    encoded = encode_project_dir(cwd)
     transcripts_dir = Path.home() / ".claude" / "projects" / encoded
     available = 0
     if transcripts_dir.exists():
@@ -1312,7 +1386,7 @@ def import_mode(argv: list):
     pricing so multi-model sessions reprice correctly.
     """
     cwd = os.path.abspath(argv[0] if argv else os.getcwd())
-    encoded = cwd.replace("/", "-")
+    encoded = encode_project_dir(cwd)
     transcripts_dir = Path.home() / ".claude" / "projects" / encoded
     if not transcripts_dir.exists():
         print(f"no Claude Code transcripts at {transcripts_dir}")
@@ -1342,6 +1416,13 @@ def import_mode(argv: list):
             empty += 1
             continue
         session_tokens, session_cost, model = sum_usages(usages, price_override)
+        # Fold in subagent spend so imported sessions match what the Stop hook records.
+        sub_tokens, sub_cost, sub_model = sum_usages(
+            collect_subagent_usages(str(transcript)), price_override)
+        for k in session_tokens:
+            session_tokens[k] += sub_tokens.get(k, 0)
+        session_cost += sub_cost
+        model = model or sub_model
         if model:
             last_model_seen = model
         started = get_session_start(msgs) or datetime.now(timezone.utc).isoformat()
@@ -1439,6 +1520,25 @@ def main():
 
     # Full session: all deduplicated assistant messages in transcript
     session_tokens, session_cost, model = sum_usages(usages, price_override)
+
+    # Fold in subagent (Task tool) spend. Claude Code stores each subagent run in
+    # a separate <session_id>/subagents/agent-*.jsonl file, absent from the main
+    # transcript — without this, subagent-heavy sessions under-report cost/tokens.
+    # Session/project totals get every subagent; the current turn gets only those
+    # that started at/after the last human message (per-model pricing preserved).
+    sub_tokens, sub_cost, sub_model = sum_usages(
+        collect_subagent_usages(transcript_path), price_override)
+    for k in session_tokens:
+        session_tokens[k] += sub_tokens.get(k, 0)
+    session_cost += sub_cost
+    model = model or sub_model
+
+    turn_sub_tokens, turn_sub_cost, _ = sum_usages(
+        collect_subagent_usages(transcript_path, since=last_human_timestamp(messages)),
+        price_override)
+    for k in last_usage:
+        last_usage[k] += turn_sub_tokens.get(k, 0)
+    last_cost += turn_sub_cost
 
     # Context window usage (last API call = most recent context snapshot).
     # window_size comes from the stored status written by render_mode with live Claude Code data.

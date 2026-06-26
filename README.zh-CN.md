@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](#更新日志)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](#更新日志)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 为 Claude Code（终端版）提供实时 token 用量与花费统计，直接显示在状态栏里。
@@ -18,8 +18,8 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 | **🌡️ %** | 上下文窗口占用率 —— 绿 < 50%，蓝 50–74%，黄 75–89%，红 ≥ 90% |
 | **🎯 %** | 本次会话缓存命中率（`cache_read` / 总输入）—— 橙 < 50%，黄 50–74%，蓝 75–89%，绿 ≥ 90%；会话尚无输入时不显示 |
 | **🎫 N** | 项目级 token 总消耗（input + output + cache_read + cache_creation 之和）。父项目显示家庭合计（父 + 全部子项目），独立项目和子项目显示自身合计 |
-| **Turn** | 上一轮已完成对话的花费 + token（所有 API 调用累加） |
-| **Sess** | 本次会话累计的花费、token、轮数、活跃时长 |
+| **Turn** | 上一轮已完成对话的花费 + token（所有 API 调用累加，含本轮运行的 subagent） |
+| **Sess** | 本次会话累计的花费、token、轮数、活跃时长（含 subagent / Task 工具花费） |
 | **Proj** | 本项目累计的花费、token、会话数、总轮数、活跃时长 |
 
 ### Token 标记说明
@@ -157,14 +157,16 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 **Stop hook**（异步）在 Claude 每次回复结束后触发：
 - 读取 session transcript，并对 API 调用去重（一次响应可能跨多个 transcript 条目）
 - 统计真实的人类轮数（tool_result 类型的消息会排除）
+- 合并 **subagent（Task 工具）花费** —— Claude Code 把每个 subagent 运行单独写到 `<session_id>/subagents/agent-*.jsonl`，主 transcript 里没有，因此需要单独读取并按各自模型计价，累加进 Sess / Proj（本轮运行的 subagent 还会计入 Turn）
 - 计算 Turn / Sess / Proj 的花费和 token 累计
 - 写入 `~/.claude/token_usage/status/current.json`
 
-**状态栏**通过 `token_status.sh` 在事件触发时刷新（每条 assistant 消息完成、permission 模式切换、vim 模式切换；可选 `refreshInterval` 周期刷新，去抖 300ms）：
+**状态栏**通过 `token_status.sh` 每 30 秒刷新一次：
 - 从 stdin 接收 Claude Code 实时传入的 model ID 与 `context_window.current_usage`
 - `/model` 切换模型时显示立即更新
 - 上下文窗口**大小**取自 Claude Code 实时的 `context_window_size`（这样 1M 变体的 opt-in 也能正确识别）；内置模型表只是 fallback
 - 上下文窗口**百分比**在本地从 `current_usage` 用 Claude Code 文档里的纯输入公式重新计算（`input + cache_creation + cache_read`，不含输出）
+- **状态栏自己永远不重置 Turn / Sess。** 状态栏拿到的 `session_id` 不一定等于 Stop hook 记账用的 id —— 在 Claude Code 后台会话（background session）和每会话独立 git worktree 下，前台状态栏报告的是一个 session，而真正干活/触发 Stop 的是另一个，但两者归属同一个被追踪的项目。会话重置只由 SessionStart / UserPromptSubmit hook 负责（它们和 Stop hook 共享同一个工作 session id），因此状态栏会实时反映 Turn / Sess，而不会反复闪回 0
 
 **活跃时长**统计的是人机协作的总时间：累加双方所有间隔 ≤ 3 分钟的消息间隔。超过 3 分钟的间隔（空闲、离开屏幕、未响应的权限弹窗等）会被排除。
 
@@ -174,6 +176,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 | 模型 | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |------|-------|--------|----------------|----------------|------------|
+| Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
@@ -183,7 +186,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-价格按每百万 token 计。**Opus 4.8 / 4.7 / 4.6** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+价格按每百万 token 计。**Fable 5 / Mythos 5**、**Opus 4.8 / 4.7 / 4.6** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-06-26 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
 
 ## 数据存储位置
 
@@ -196,6 +199,16 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.3.0] — 2026-06-26
+
+**Fixed**
+- **修复后台会话下状态栏 Turn / Sess 卡住不更新。** Claude Code 的后台会话（background session）和每会话独立 git worktree，会让状态栏拿到的 `session_id` 与 Stop hook 记账用的 id 不一致（两者仍归属同一个被追踪项目）。`render_mode` 原本的「换会话自愈」逻辑把这种不一致当成新会话，每 30 秒渲染就把 Turn / Sess 清零，于是状态栏看起来卡死。现在渲染不再因 `session_id` 不一致而重置 —— 会话重置只交给 SessionStart / UserPromptSubmit hook（它们与 Stop hook 共享同一个工作 session id）
+- `--import` / `--init` 现在能正确找到**路径含空格或点号**的项目 transcript（例如 `NCARB Study/app`）。Claude Code 把 transcript 目录名里的每个非字母数字字符都替换成 `-`，不只是 `/`；之前只替换 `/` 的写法会静默漏掉这类路径
+
+**Added**
+- **subagent（Task 工具）花费统计。** Claude Code 把每个 subagent 运行单独写到 `<session_id>/subagents/agent-*.jsonl`，主 transcript 里没有，因此 subagent 的 token 此前完全没被统计 —— subagent 密集的会话花费被低估。现在 Stop hook（以及 `--import`）会读取这些文件，按各自模型计价后并入 Sess / Proj，本轮运行的 subagent 还计入 Turn。活跃会话在下一次 Stop 时自动补上修正后的合计；已导入的历史会话除非重新导入否则不变
+- **Claude Fable 5**（`claude-fable-5`）与 **Claude Mythos 5**（`claude-mythos-5`）定价 —— 每百万 token $10 / $50，1M 上下文（缓存写入 5m $12.50 / 1h $20.00，缓存读取 $1.00）。已于 2026-06-26 对照 platform.claude.com 目录核验
 
 ### [1.2.1] — 2026-05-18
 
