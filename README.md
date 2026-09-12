@@ -2,7 +2,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](#changelog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Real-time token usage and cost tracking for Claude Code (Terminal), shown directly in the status bar.
@@ -28,7 +28,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |--------|---------|
 | `↑` | Total input tokens (non-cached + cache_creation + cache_read) |
 | `↓` | Output tokens generated |
-| `«` | Portion of `↑` served from cache (0.1× input rate) |
+| `«` | Portion of `↑` served from cache (0.1× input rate; 0.025× on Fable/Mythos 5.1) |
 
 ## Install
 
@@ -176,9 +176,12 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 
 | Model | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |-------|-------|--------|----------------|----------------|------------|
+| Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
+| Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
+| Sonnet 5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.20 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
 | Sonnet 3.7 / 3.5 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
@@ -186,7 +189,27 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-Prices are per million tokens. **Fable 5 / Mythos 5**, **Opus 4.8 / 4.7 / 4.6**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-06-26. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+Prices are per million tokens. **Fable 5.1 / 5**, **Mythos 5.1 / 5**, **Opus 5 / 4.8 / 4.7 / 4.6**, **Sonnet 5**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-09-12. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+
+† Cache reads on **Fable 5.1 / Mythos 5.1** are billed at 0.025× input, not the usual 0.1×. Every other model uses 0.1×.
+
+**Fast mode** (research preview, Claude API only) bills **Opus 5 / Opus 4.8** at $10 / $50 per Mtok. ClaudeCount detects it from `usage.speed == "fast"` in the transcript and applies the premium tier automatically; cache multipliers stack on top of the fast base.
+
+### `--reprice` — recompute historical costs
+
+When a model is missing from the pricing table, its sessions are recorded at a
+$3/$15 fallback rate. After adding the model, `--reprice` corrects the history:
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --reprice          # preview
+python3 ~/.claude/hooks/token_tracker.py --reprice --yes     # apply
+```
+
+Sessions whose Claude Code transcript is still on disk are repriced exactly —
+every API call against the model that actually served it, with subagent spend
+folded in. Sessions whose transcript has been rotated away are left untouched
+unless they use a model that was provably mispriced, because re-deriving a cost
+from a flat token total would corrupt any session that mixed models. Idempotent.
 
 ## Data location
 
@@ -200,6 +223,23 @@ Prices are per million tokens. **Fable 5 / Mythos 5**, **Opus 4.8 / 4.7 / 4.6**,
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+### [1.4.0] — 2026-09-12
+
+#### Added
+- **Claude Opus 5** (`claude-opus-5`) — $5 / $25 per Mtok, 1M context (cache write 5m $6.25 / 1h $10.00, cache read $0.50)
+- **Claude Sonnet 5** (`claude-sonnet-5`) — $2 / $10 per Mtok, 1M context (cache write 5m $2.50 / 1h $4.00, cache read $0.20)
+- **Claude Fable 5.1** (`claude-fable-5-1`) and **Claude Mythos 5.1** (`claude-mythos-5-1`) — $10 / $50 per Mtok, 1M context. Cache reads bill at **0.025× input** ($0.25), the only models that deviate from the usual 0.1×
+- **Fast mode pricing** — `usage.speed == "fast"` now bills Opus 5 / Opus 4.8 at the $10 / $50 premium tier, with cache multipliers stacking on the fast base
+- **`--reprice`** — recompute stored session costs at current prices. Transcript-first (exact, per-API-call, folds in subagent spend); transcript-less sessions are left untouched unless their model was provably mispriced. Preview by default, `--yes` to apply, idempotent
+- Invariant tests pinning the 1.25× / 2× cache-write and 0.1× cache-read multipliers across the whole table, with the Fable/Mythos 5.1 and Haiku 3 exceptions encoded
+
+#### Fixed
+- **Opus 5 and Sonnet 5 sessions were priced at the `_DEFAULT_MODEL` $3 / $15 fallback.** Opus 5 — the current default model — was under-reported by ~40% and Sonnet 5 over-reported by 50%. Repricing this repo author's own history moved the tracked total +$1,023
+
+#### Verified
+- All rates re-checked against [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) on 2026-09-12. Confirmed unchanged: Fable 5 / Mythos 5, Opus 4.8 / 4.7 / 4.6 / 4.5, Sonnet 4.6, Haiku 4.5. Sonnet 5's $2 / $10 introductory rate is now permanent (the scheduled 2026-09-01 rise to $3 / $15 was cancelled)
+- `usage.service_tier` and `usage.inference_geo` are carried in Claude Code transcripts but read `"standard"` / `"not_available"`, so the Batch 50% discount and the 1.1× US data-residency multiplier never apply — documented rather than implemented
+
 ### [1.3.0] — 2026-06-26
 
 **Fixed**
@@ -208,7 +248,7 @@ This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Kee
 
 **Added**
 - **Subagent (Task tool) cost accounting.** Claude Code stores each subagent run in a separate `<session_id>/subagents/agent-*.jsonl` file that is absent from the main transcript, so subagent tokens were previously uncounted — under-reporting cost for subagent-heavy sessions. The Stop hook (and `--import`) now read those files and fold their per-model spend into Sess / Proj totals, and into Turn for subagents that ran during the last turn. Active sessions pick up the corrected totals on their next Stop; previously-imported historical sessions are unchanged unless re-imported
-- **Claude Fable 5** (`claude-fable-5`) and **Claude Mythos 5** (`claude-mythos-5`) pricing — $10 / $50 per Mtok, 1M context (cache write 5m $12.50 / 1h $20.00, cache read $1.00). Verified against the platform.claude.com catalog on 2026-06-26
+- **Claude Fable 5** (`claude-fable-5`) and **Claude Mythos 5** (`claude-mythos-5`) pricing — $10 / $50 per Mtok, 1M context (cache write 5m $12.50 / 1h $20.00, cache read $1.00). Verified against the platform.claude.com catalog on 2026-09-12
 
 ### [1.2.1] — 2026-05-18
 

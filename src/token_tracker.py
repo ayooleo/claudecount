@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -44,12 +44,22 @@ def _is_assistant(msg: dict) -> bool:
 #   cache_read     =                       (0.1×  input)
 # 1M context: Opus 4.8 / 4.7 / 4.6, Sonnet 4.6. All other models 200K.
 MODELS = {
-    # Claude 5 family (Fable / Mythos) — most capable; 1M context. Verified 2026-06-26
-    # against the platform.claude.com model catalog ($10 / $50 per MTok).
+    # Claude 5 family (Fable / Mythos) — most capable; 1M context. Verified 2026-09-12
+    # against the platform.claude.com pricing page ($10 / $50 per MTok).
+    # NOTE: Fable 5.1 / Mythos 5.1 price cache reads at 0.025x input ($0.25), NOT the
+    # usual 0.1x. Every other model uses 0.1x. Don't "fix" this to 1.00.
+    "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25, "context": 1_000_000, "name": "Fable 5.1"},
+    "claude-mythos-5-1": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25, "context": 1_000_000, "name": "Mythos 5.1"},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Fable 5"},
     "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Mythos 5"},
+    # Opus 5 / Sonnet 5 — current default lineup. `fast` is the research-preview fast
+    # mode premium tier (usage.speed == "fast"), Opus 5 / Opus 4.8 only.
+    "claude-opus-5":     {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 5",
+                          "fast": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00}},
+    "claude-sonnet-5":   {"input":  2.00, "output": 10.00, "cache_write_5m":  2.50, "cache_write_1h":  4.00, "cache_read": 0.20, "context": 1_000_000, "name": "Sonnet 5"},
     # Claude 4 family
-    "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.8"},
+    "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.8",
+                          "fast": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00}},
     "claude-opus-4-7":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.7"},
     "claude-opus-4-6":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.6"},
     "claude-opus-4-5":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context":   200_000, "name": "Opus 4.5"},
@@ -103,8 +113,12 @@ def fmt_model(model: str) -> str:
 _PRICE_KEYS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
 
 
-def get_pricing(model: str, overrides: dict = None) -> dict:
+def get_pricing(model: str, overrides: dict = None, speed: str = None) -> dict:
     m = _resolve_model(model)
+    # Fast mode (research preview, Opus 5 / Opus 4.8) bills at a premium tier.
+    # Cache multipliers stack on top of the fast base, so the whole block is swapped.
+    if speed == "fast" and "fast" in m:
+        m = m["fast"]
     base = {k: m[k] for k in _PRICE_KEYS}
     if not overrides:
         return base
@@ -122,7 +136,7 @@ def get_context_window(model: str) -> int:
 
 
 def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
-    p = get_pricing(model, price_override)
+    p = get_pricing(model, price_override, usage.get("speed"))
     # Two-tier cache write: prefer detailed breakdown when available
     cc = usage.get("cache_creation", {})
     tokens_5m = cc.get("ephemeral_5m_input_tokens", 0)
@@ -979,6 +993,153 @@ def backfill_mode():
     print(f"backfilled {backfilled} session(s)")
 
 
+# Models added to MODELS on 2026-09-12. Sessions recorded against one of these
+# were priced at _DEFAULT_MODEL ($3/$15) at the time, so their stored cost is
+# known-wrong and worth repricing even without a transcript. Any other model's
+# stored cost is an exact per-call sum and must be left alone (see below).
+_NEWLY_PRICED = {
+    "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-mythos-5-1",
+}
+
+
+def _reprice_session(sess: dict, transcript: Path, price_override: dict) -> tuple:
+    """Return (tokens, cost, model, how) for one session at today's prices.
+
+    `how` is "exact", "approx", or "skip".
+
+    Exact — the transcript is on disk, so every API call is repriced against the
+    model that actually served it. Multi-model sessions (a mid-session /model
+    switch, subagents on another model) stay correct, and subagent spend gets
+    folded in for sessions imported before that existed.
+
+    Without a transcript all we have is a flat token total plus one model name.
+    A session's stored cost is an exact per-call sum, so re-deriving it from that
+    flat total at a single model's rate makes *correct* data worse whenever the
+    session mixed models — measured at -$21.89 on this repo's own project alone.
+    So the no-transcript path only runs for a model in _NEWLY_PRICED, where the
+    stored cost is known to have been computed at the $3/$15 fallback rate and
+    any reprice is an improvement. Everything else is skipped untouched.
+    """
+    if transcript and transcript.exists():
+        msgs = read_transcript(str(transcript))
+        usages = get_all_assistant_usages(msgs) if msgs else []
+        if usages:
+            tokens, cost, model = sum_usages(usages, price_override)
+            sub_tokens, sub_cost, sub_model = sum_usages(
+                collect_subagent_usages(str(transcript)), price_override)
+            for k in tokens:
+                tokens[k] += sub_tokens.get(k, 0)
+            return tokens, cost + sub_cost, (model or sub_model or sess.get("model", "")), "exact"
+
+    tokens = sess.get("tokens", {}) or {}
+    model = sess.get("model", "")
+    resolved = next((k for k in _MODEL_KEYS_BY_LEN if k in model), None)
+    if resolved in _NEWLY_PRICED:
+        return tokens, calc_cost(tokens, model, price_override), model, "approx"
+    return tokens, sess.get("cost", 0), model, "skip"
+
+
+def reprice_mode(argv: list):
+    """One-shot: recompute every stored session's cost at today's MODELS prices.
+
+    Use after a pricing correction or after adding a model that sessions had
+    previously been falling back to _DEFAULT_MODEL for. Idempotent — running it
+    twice changes nothing the second time.
+
+    Preview by default; pass --yes to write. A `legacy` block is never touched:
+    it carries a flat cost_usd with no token breakdown to reprice, and
+    recompute_project_totals folds it back in afterwards.
+    """
+    apply = "--yes" in argv
+    targets = [a for a in argv if not a.startswith("--")]
+    if not DATA_DIR.exists():
+        print("no project data to reprice")
+        return
+
+    transcripts_root = Path.home() / ".claude" / "projects"
+    sid_to_path = {p.stem: p for p in transcripts_root.glob("*/*.jsonl")} \
+        if transcripts_root.exists() else {}
+
+    want_pids = {project_id(os.path.abspath(t)) for t in targets} if targets else None
+
+    rows, grand_old, grand_new = [], 0.0, 0.0
+    counts = {"exact": 0, "approx": 0, "skip": 0}
+    for proj_file in sorted(DATA_DIR.glob("*.json")):
+        try:
+            data = json.loads(proj_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if want_pids and data.get("pid") not in want_pids:
+            continue
+        sessions = data.get("sessions", {})
+        if not sessions:
+            continue
+
+        price_override = (load_project_config(data.get("cwd", "")) or {}).get("pricing", None)
+        old_total = sum(s.get("cost", 0) for s in sessions.values())
+        changed = 0
+        for sid, sess in sessions.items():
+            tokens, cost, model, how = _reprice_session(
+                sess, sid_to_path.get(sid), price_override)
+            counts[how] += 1
+            if how == "skip":
+                continue
+            if abs(cost - sess.get("cost", 0)) > 1e-9:
+                changed += 1
+            sess["cost"] = cost
+            sess["tokens"] = tokens
+            if model:
+                sess["model"] = model
+        new_total = sum(s.get("cost", 0) for s in sessions.values())
+
+        if changed:
+            rows.append((data.get("name", data.get("pid", "?")), len(sessions),
+                         changed, old_total, new_total))
+        grand_old += old_total
+        grand_new += new_total
+
+        if apply and changed:
+            recompute_project_totals(data)
+            save_project_data(DATA_DIR, data["pid"], data)
+            _refresh_status_proj_segment(data)
+
+    if not rows:
+        print("all session costs already match current prices — nothing to reprice")
+        return
+
+    width = max(len(r[0]) for r in rows)
+    print(f"{'project':{width}}  {'sess':>5} {'chg':>4} {'recorded':>12} {'reprice':>12} {'delta':>12}")
+    for name, n, changed, o, nw in sorted(rows, key=lambda r: r[4] - r[3], reverse=True):
+        print(f"{name:{width}}  {n:5} {changed:4} {o:11.2f}$ {nw:11.2f}$ {nw - o:+11.2f}$")
+    print(f"{'TOTAL':{width}}  {'':5} {'':4} {grand_old:11.2f}$ {grand_new:11.2f}$ "
+          f"{grand_new - grand_old:+11.2f}$")
+    print(f"\n{counts['exact']} repriced exactly from transcript, "
+          f"{counts['approx']} from stored totals (no transcript, newly-priced model), "
+          f"{counts['skip']} left untouched (no transcript, price unchanged).")
+    print("\napplied." if apply else "\npreview only — re-run with --yes to write.")
+
+
+def _refresh_status_proj_segment(project: dict):
+    """Point the project's status file at the repriced totals so the status bar
+    doesn't show a stale Proj figure until the next Stop hook fires."""
+    status_file = STATUS_DIR / f"{project['pid']}.json"
+    if not status_file.exists():
+        return
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    children = _scan_children(project["pid"])
+    own = _own_proj_segment(project)
+    status["project"] = _live_family_totals(own, children) if children else own
+    try:
+        status_file.write_text(json.dumps(status, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    if project.get("parent_pid"):
+        _refresh_parent_status(project["parent_pid"])
+
+
 def _scan_children(parent_pid: str) -> list:
     """Return all project dicts whose parent_pid matches. Disk-scoped scan; cheap
     enough at write-time (typical project counts < 100, files small)."""
@@ -1464,6 +1625,10 @@ def main():
     if "--backfill" in sys.argv:
         backfill_mode()
         return
+    if "--reprice" in sys.argv:
+        reprice_mode(sys.argv[sys.argv.index("--reprice") + 1:])
+        return
+
     if "--init" in sys.argv:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         STATUS_DIR.mkdir(parents=True, exist_ok=True)

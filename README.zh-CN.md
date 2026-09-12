@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](#更新日志)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](#更新日志)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 为 Claude Code（终端版）提供实时 token 用量与花费统计，直接显示在状态栏里。
@@ -28,7 +28,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |------|------|
 | `↑` | 输入 token 总量（非缓存 + cache_creation + cache_read） |
 | `↓` | 生成的输出 token |
-| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费） |
+| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费，Fable/Mythos 5.1 为 0.025×） |
 
 ## 安装
 
@@ -176,9 +176,12 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 | 模型 | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |------|-------|--------|----------------|----------------|------------|
+| Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
+| Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
+| Sonnet 5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.20 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
 | Sonnet 3.7 / 3.5 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
@@ -186,7 +189,26 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-价格按每百万 token 计。**Fable 5 / Mythos 5**、**Opus 4.8 / 4.7 / 4.6** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-06-26 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+价格按每百万 token 计。**Fable 5.1 / 5**、**Mythos 5.1 / 5**、**Opus 5 / 4.8 / 4.7 / 4.6**、**Sonnet 5** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-09-12 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+
+† **Fable 5.1 / Mythos 5.1** 的缓存读取按输入价的 0.025× 计费，而非通常的 0.1×。其他模型均为 0.1×。
+
+**快速模式**（fast mode，research preview，仅 Claude API）对 **Opus 5 / Opus 4.8** 按每百万 token $10 / $50 计费。ClaudeCount 通过 transcript 中的 `usage.speed == "fast"` 自动识别并套用该溢价档；缓存倍率在快速模式基价之上叠加。
+
+### `--reprice` — 重算历史费用
+
+模型不在价目表中时，其 session 会按 $3/$15 的兜底价记账。补上模型后，用
+`--reprice` 修正历史数据：
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --reprice          # 预览
+python3 ~/.claude/hooks/token_tracker.py --reprice --yes     # 应用
+```
+
+transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调用都按实际服务它的
+模型计价，并合并 subagent 开销。transcript 已轮转丢失的 session 默认保持原样，
+除非其模型确实曾被错误计价：因为从扁平的 token 总量反推费用，会破坏任何混用了
+多个模型的 session。该命令幂等。
 
 ## 数据存储位置
 
@@ -200,6 +222,23 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
 
+### [1.4.0] — 2026-09-12
+
+#### 新增
+- **Claude Opus 5**（`claude-opus-5`）—— 每百万 token $5 / $25，1M 上下文（缓存写入 5m $6.25 / 1h $10.00，缓存读取 $0.50）
+- **Claude Sonnet 5**（`claude-sonnet-5`）—— 每百万 token $2 / $10，1M 上下文（缓存写入 5m $2.50 / 1h $4.00，缓存读取 $0.20）
+- **Claude Fable 5.1**（`claude-fable-5-1`）与 **Claude Mythos 5.1**（`claude-mythos-5-1`）—— 每百万 token $10 / $50，1M 上下文。缓存读取按输入价的 **0.025×**（$0.25）计费，是全表唯一偏离 0.1× 的模型
+- **快速模式计价** —— `usage.speed == "fast"` 时，Opus 5 / Opus 4.8 按 $10 / $50 溢价档计费，缓存倍率在快速模式基价之上叠加
+- **`--reprice`** —— 按当前价格重算已存 session 费用。优先使用 transcript（精确、逐次 API 调用、合并 subagent 开销）；transcript 已丢失的 session 除非其模型确实曾被错误计价，否则保持原样。默认预览，`--yes` 应用，幂等
+- 新增不变量测试：锁定全表的 1.25× / 2× 缓存写入与 0.1× 缓存读取倍率，并显式编码 Fable/Mythos 5.1 与 Haiku 3 两个例外
+
+#### 修复
+- **Opus 5 与 Sonnet 5 的 session 一直按 `_DEFAULT_MODEL` 的 $3 / $15 兜底价计费。** Opus 5 作为当前默认模型被低估约 40%，Sonnet 5 被高估 50%。对本项目作者自己的历史数据重算后，追踪总额上调 $1,023
+
+#### 核验
+- 所有费率已于 2026-09-12 重新对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 核对。确认未变动：Fable 5 / Mythos 5、Opus 4.8 / 4.7 / 4.6 / 4.5、Sonnet 4.6、Haiku 4.5。Sonnet 5 的 $2 / $10 首发价已转为长期价（原定 2026-09-01 上调至 $3 / $15 的计划已取消）
+- Claude Code 的 transcript 中带有 `usage.service_tier` 与 `usage.inference_geo`，但取值恒为 `"standard"` / `"not_available"`，因此 Batch 50% 折扣与 1.1× 美国数据驻留倍率都不会生效 —— 仅作文档说明，未实现
+
 ### [1.3.0] — 2026-06-26
 
 **Fixed**
@@ -208,7 +247,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 **Added**
 - **subagent（Task 工具）花费统计。** Claude Code 把每个 subagent 运行单独写到 `<session_id>/subagents/agent-*.jsonl`，主 transcript 里没有，因此 subagent 的 token 此前完全没被统计 —— subagent 密集的会话花费被低估。现在 Stop hook（以及 `--import`）会读取这些文件，按各自模型计价后并入 Sess / Proj，本轮运行的 subagent 还计入 Turn。活跃会话在下一次 Stop 时自动补上修正后的合计；已导入的历史会话除非重新导入否则不变
-- **Claude Fable 5**（`claude-fable-5`）与 **Claude Mythos 5**（`claude-mythos-5`）定价 —— 每百万 token $10 / $50，1M 上下文（缓存写入 5m $12.50 / 1h $20.00，缓存读取 $1.00）。已于 2026-06-26 对照 platform.claude.com 目录核验
+- **Claude Fable 5**（`claude-fable-5`）与 **Claude Mythos 5**（`claude-mythos-5`）定价 —— 每百万 token $10 / $50，1M 上下文（缓存写入 5m $12.50 / 1h $20.00，缓存读取 $1.00）。已于 2026-09-12 对照 platform.claude.com 目录核验
 
 ### [1.2.1] — 2026-05-18
 
