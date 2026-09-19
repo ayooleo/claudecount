@@ -196,6 +196,57 @@ class FastModeTests(unittest.TestCase):
         self.assertAlmostEqual(cost, 2.0, places=4)
 
 
+class CacheTierTests(unittest.TestCase):
+    """1h cache writes bill at 2× input, 5m at 1.25× — from the usage breakdown."""
+
+    @staticmethod
+    def _usage(cc_total, m5=None, h1=None):
+        u = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": cc_total}
+        if m5 is not None or h1 is not None:
+            u["cache_creation"] = {"ephemeral_5m_input_tokens": m5 or 0,
+                                   "ephemeral_1h_input_tokens": h1 or 0}
+        return u
+
+    def test_1h_breakdown_bills_at_2x_input(self):
+        u = self._usage(1_000_000, m5=0, h1=1_000_000)
+        self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5"), 10.0, places=4)
+
+    def test_mixed_tiers_bill_separately(self):
+        u = self._usage(1_000_000, m5=600_000, h1=400_000)
+        # 0.6M × 6.25 + 0.4M × 10.00
+        self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5"), 7.75, places=4)
+
+    def test_no_breakdown_falls_back_to_5m(self):
+        self.assertAlmostEqual(t.calc_cost(self._usage(1_000_000), "claude-opus-5"),
+                               6.25, places=4)
+
+    def test_uncovered_remainder_bills_at_5m(self):
+        # Aggregate of one 1h call plus one older call with no breakdown.
+        u = self._usage(1_000_000, m5=0, h1=400_000)
+        self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5"), 4.0 + 0.6 * 6.25, places=4)
+
+    def test_sum_usages_keeps_breakdown_and_matches_per_call_cost(self):
+        calls = [(self._usage(300_000, m5=0, h1=300_000), "claude-opus-5"),
+                 (self._usage(200_000, m5=200_000, h1=0), "claude-opus-5"),
+                 (self._usage(100_000), "claude-opus-5")]
+        tokens, cost, _ = t.sum_usages(calls)
+        self.assertEqual(tokens["cache_creation_input_tokens"], 600_000)
+        self.assertEqual(tokens["cache_creation"],
+                         {"ephemeral_5m_input_tokens": 200_000,
+                          "ephemeral_1h_input_tokens": 300_000})
+        # Re-costing the flat total reproduces the exact per-call sum.
+        self.assertAlmostEqual(t.calc_cost(tokens, "claude-opus-5"), cost, places=6)
+
+    def test_add_tokens_merges_breakdown(self):
+        a, _, _ = t.sum_usages([(self._usage(100, h1=100), "claude-opus-5")])
+        b, _, _ = t.sum_usages([(self._usage(50, m5=50), "claude-opus-5")])
+        t._add_tokens(a, b)
+        self.assertEqual(a["cache_creation_input_tokens"], 150)
+        self.assertEqual(a["cache_creation"], {"ephemeral_5m_input_tokens": 50,
+                                               "ephemeral_1h_input_tokens": 100})
+
+
 class EncoderTests(unittest.TestCase):
     def test_spaces_and_slashes(self):
         self.assertEqual(
@@ -328,6 +379,16 @@ class RepriceSessionTests(unittest.TestCase):
         tokens, cost, model, how = t._reprice_session(sess, None, None)
         self.assertEqual(how, "approx")
         self.assertAlmostEqual(cost, 30.0, places=4)
+
+    def test_no_transcript_reprice_bills_stored_1h_breakdown_at_2x(self):
+        tokens = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 1_000_000,
+                  "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                                     "ephemeral_1h_input_tokens": 1_000_000}}
+        sess = {"cost": 3.75, "tokens": tokens, "model": "claude-opus-5"}
+        _, cost, _, how = t._reprice_session(sess, None, None)
+        self.assertEqual(how, "approx")
+        self.assertAlmostEqual(cost, 10.0, places=4)
 
     def test_newly_priced_matches_with_variant_suffix(self):
         sess = {"cost": 18.0, "tokens": self.TOKENS, "model": "claude-opus-5[1m]"}
