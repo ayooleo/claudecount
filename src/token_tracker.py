@@ -138,12 +138,12 @@ def get_context_window(model: str) -> int:
 def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
     p = get_pricing(model, price_override, usage.get("speed"))
     # Two-tier cache write: prefer detailed breakdown when available
-    cc = usage.get("cache_creation", {})
+    cc = usage.get("cache_creation") or {}
     tokens_5m = cc.get("ephemeral_5m_input_tokens", 0)
     tokens_1h  = cc.get("ephemeral_1h_input_tokens", 0)
-    if not (tokens_5m or tokens_1h):
-        # Fallback: treat whole cache_creation as 5m tier (conservative estimate)
-        tokens_5m = usage.get("cache_creation_input_tokens", 0)
+    # Any cache_creation not covered by the breakdown (no breakdown at all, or an
+    # aggregate mixing calls with and without one) is billed at the 5m tier.
+    tokens_5m += max(0, usage.get("cache_creation_input_tokens", 0) - tokens_5m - tokens_1h)
     return (
         usage.get("input_tokens", 0)            / 1e6 * p["input"]
         + usage.get("output_tokens", 0)         / 1e6 * p["output"]
@@ -378,18 +378,29 @@ def collect_subagent_usages(transcript_path: str, since=None) -> list:
     return out
 
 
+_TOKEN_KEYS = ("input_tokens", "output_tokens",
+               "cache_creation_input_tokens", "cache_read_input_tokens")
+_CACHE_TIER_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def _add_tokens(dst: dict, src: dict) -> None:
+    """In-place dst += src for a sum_usages token dict, including the nested
+    cache_creation tier breakdown (kept so a flat-total reprice bills 1h writes at 2×)."""
+    for key in _TOKEN_KEYS:
+        dst[key] = dst.get(key, 0) + src.get(key, 0)
+    src_cc = src.get("cache_creation") or {}
+    dst_cc = dst.setdefault("cache_creation", {k: 0 for k in _CACHE_TIER_KEYS})
+    for key in _CACHE_TIER_KEYS:
+        dst_cc[key] = dst_cc.get(key, 0) + src_cc.get(key, 0)
+
+
 def sum_usages(usages: list, price_override: dict = None) -> tuple:
-    total = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-    }
+    total = {key: 0 for key in _TOKEN_KEYS}
+    total["cache_creation"] = {key: 0 for key in _CACHE_TIER_KEYS}
     total_cost = 0.0
     last_model = ""
     for usage, model in usages:
-        for key in total:
-            total[key] += usage.get(key, 0)
+        _add_tokens(total, usage)
         total_cost += calc_cost(usage, model, price_override)
         if model:
             last_model = model
@@ -1027,8 +1038,7 @@ def _reprice_session(sess: dict, transcript: Path, price_override: dict) -> tupl
             tokens, cost, model = sum_usages(usages, price_override)
             sub_tokens, sub_cost, sub_model = sum_usages(
                 collect_subagent_usages(str(transcript)), price_override)
-            for k in tokens:
-                tokens[k] += sub_tokens.get(k, 0)
+            _add_tokens(tokens, sub_tokens)
             return tokens, cost + sub_cost, (model or sub_model or sess.get("model", "")), "exact"
 
     tokens = sess.get("tokens", {}) or {}
@@ -1580,8 +1590,7 @@ def import_mode(argv: list):
         # Fold in subagent spend so imported sessions match what the Stop hook records.
         sub_tokens, sub_cost, sub_model = sum_usages(
             collect_subagent_usages(str(transcript)), price_override)
-        for k in session_tokens:
-            session_tokens[k] += sub_tokens.get(k, 0)
+        _add_tokens(session_tokens, sub_tokens)
         session_cost += sub_cost
         model = model or sub_model
         if model:
@@ -1693,16 +1702,14 @@ def main():
     # that started at/after the last human message (per-model pricing preserved).
     sub_tokens, sub_cost, sub_model = sum_usages(
         collect_subagent_usages(transcript_path), price_override)
-    for k in session_tokens:
-        session_tokens[k] += sub_tokens.get(k, 0)
+    _add_tokens(session_tokens, sub_tokens)
     session_cost += sub_cost
     model = model or sub_model
 
     turn_sub_tokens, turn_sub_cost, _ = sum_usages(
         collect_subagent_usages(transcript_path, since=last_human_timestamp(messages)),
         price_override)
-    for k in last_usage:
-        last_usage[k] += turn_sub_tokens.get(k, 0)
+    _add_tokens(last_usage, turn_sub_tokens)
     last_cost += turn_sub_cost
 
     # Context window usage (last API call = most recent context snapshot).
