@@ -14,7 +14,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 | Segment | Meaning |
 |---------|---------|
 | **PROJECT NAME** | Active project (directory name, uppercased) |
-| **Model** | Current model name and context window size |
+| **Model** | Current model name, `⚡` when fast mode is on, the effort level (e.g. `medium`), and context window size — all taken live from Claude Code |
 | **🌡️ %** | Context window fill — green < 50%, blue 50–74%, yellow 75–89%, red ≥ 90% |
 | **🎯 %** | Session cache hit rate (`cache_read` / total input) — orange < 50%, yellow 50–74%, blue 75–89%, green ≥ 90%; hidden until the session has any input |
 | **🎫 N** | Project-total token consumption (input + output + cache_read + cache_creation summed). For parent projects: family aggregate (parent + every child); for standalone and sub-projects: their own total |
@@ -28,7 +28,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |--------|---------|
 | `↑` | Total input tokens (non-cached + cache_creation + cache_read) |
 | `↓` | Output tokens generated |
-| `«` | Portion of `↑` served from cache (0.1× input rate; 0.025× on Fable/Mythos 5.1) |
+| `«` | Portion of `↑` served from cache (0.1× input rate; 0.05× on Opus 5.5; 0.025× on Fable/Mythos 5.1) |
 
 ## Install
 
@@ -178,6 +178,7 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 |-------|-------|--------|----------------|----------------|------------|
 | Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
+| Opus 5.5 | $4.00 | $20.00 | $5.00 | $8.00 | $0.20 † |
 | Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
@@ -189,11 +190,27 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-Prices are per million tokens. **Fable 5.1 / 5**, **Mythos 5.1 / 5**, **Opus 5 / 4.8 / 4.7 / 4.6**, **Sonnet 5**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-09-12. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+Prices are per million tokens. **Fable 5.1 / 5**, **Mythos 5.1 / 5**, **Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**, **Sonnet 5**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-09-22. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
 
-† Cache reads on **Fable 5.1 / Mythos 5.1** are billed at 0.025× input, not the usual 0.1×. Every other model uses 0.1×.
+† Cache reads are billed below the usual 0.1× input on three models: **Opus 5.5** at 0.05× ($0.20), **Fable 5.1 / Mythos 5.1** at 0.025× ($0.25). Every other model uses 0.1×.
 
-**Fast mode** (research preview, Claude API only) bills **Opus 5 / Opus 4.8** at $10 / $50 per Mtok. ClaudeCount detects it from `usage.speed == "fast"` in the transcript and applies the premium tier automatically; cache multipliers stack on top of the fast base.
+**Fast mode** (research preview) bills **Opus 5.5** at $8 / $40 and **Opus 5 / Opus 4.8** at $10 / $50 per Mtok. ClaudeCount detects it from `usage.speed == "fast"` in the transcript and applies the premium tier automatically; cache multipliers stack on top of the fast base.
+
+**Server-side model fallback.** When a request falls back to another model mid-flight (Claude Code 2.1.27x records e.g. `claude-fable-5` → `claude-opus-4-8` in `usage.iterations`), both attempts are billed, each at its own model's rates. The top-level `usage` only covers the last attempt, so ClaudeCount prices every iteration separately.
+
+### `--audit` — check for Claude changes the tracker doesn't cover yet
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --audit             # last 14 days of transcripts
+python3 ~/.claude/hooks/token_tracker.py --audit --days 60
+```
+
+Scans recent transcripts and reports, as `ISSUE:` lines, any model id with no
+pricing entry (including ones that only match an older model by prefix, e.g. a
+new `claude-opus-5-7` billing as Opus 5), new `usage` fields, new
+`usage.iterations` types, and pricing modifiers ClaudeCount doesn't apply.
+`audit: 0 issue(s)` means the price table and parser cover everything seen.
+The `claudecount-sync-claude` skill runs this after a Claude update.
 
 ### `--reprice` — recompute historical costs
 
@@ -222,6 +239,21 @@ from a flat token total would corrupt any session that mixed models. Idempotent.
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.5.0] — 2026-09-22
+
+#### Added
+- **Claude Opus 5.5** (`claude-opus-5-5`, Claude Code 2.1.280's default Opus): $4 / $20 per Mtok, 1M context. Cache write 5m $5.00 / 1h $8.00, cache read **$0.20 (0.05× input)**. Fast mode $8 / $40
+- **Effort level and fast mode on the status bar**, next to the model name (`Opus 5.5 ⚡ medium 1M`), read live from Claude Code's status-line `effort.level` / `fast_mode`
+- **`--audit`**: reports transcript drift the tracker doesn't cover yet (unknown or prefix-matched models, new usage fields, new iteration types, unapplied pricing modifiers)
+
+#### Fixed
+- **Streamed responses were counted two or three times.** Claude Code writes one transcript row per content block, and early rows carry a mid-stream `output_tokens` (e.g. 8, then 642 on the last row). The old consecutive-identical-usage dedup therefore kept every row, billing the request's input and cache tokens once per block. Calls are now keyed by `requestId` (falling back to `message.id`), keeping only the final row. On this repo author's data, `--reprice` moved the tracked total by −$109 (−0.7%)
+- **Opus 5.5 was billed and displayed as Opus 5** through the `claude-opus-5` prefix match, over-reporting it by about 25% on input/output and 2.5× on cache reads
+- **Server-side model fallback under-billed.** Only the final attempt (`fallback_message`) was priced. Each `usage.iterations` entry is now billed at its own model's rates
+
+#### Known limitation
+- Advisor-model tokens (a transcript's `advisorModel` differing from `model`) are not written to the transcript, so they can't be counted. `--audit` reports how many calls this affects
 
 ### [1.4.0] — 2026-09-12
 

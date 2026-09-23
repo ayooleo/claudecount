@@ -132,16 +132,40 @@ class ModelPricingTests(unittest.TestCase):
         self.assertEqual(t._resolve_model("claude-fable-5")["name"], "Fable 5")
         self.assertEqual(t._resolve_model("claude-fable-5-1[1m]")["name"], "Fable 5.1")
 
+    # --- Added 2026-09-22 (Claude Code 2.1.280, platform.claude.com/pricing) ---
+
+    def test_opus55_priced_at_4_and_20_with_005x_cache_read(self):
+        m = t._resolve_model("claude-opus-5-5")
+        self.assertEqual(m["name"], "Opus 5.5")
+        self.assertEqual((m["input"], m["output"], m["context"]), (4.0, 20.0, 1_000_000))
+        self.assertEqual((m["cache_write_5m"], m["cache_write_1h"], m["cache_read"]),
+                         (5.0, 8.0, 0.20))
+
+    def test_opus55_wins_over_opus5_substring(self):
+        # "claude-opus-5" is a substring of "claude-opus-5-5"; before this entry
+        # existed every Opus 5.5 call was billed (and shown) as Opus 5.
+        self.assertEqual(t._resolve_model("claude-opus-5-5[1m]")["name"], "Opus 5.5")
+        self.assertEqual(t._resolve_model("claude-opus-5")["name"], "Opus 5")
+
+    def test_opus55_fast_tier(self):
+        f = t.get_pricing("claude-opus-5-5", speed="fast")
+        self.assertEqual((f["input"], f["output"], f["cache_read"]), (8.0, 40.0, 0.40))
+
     # Haiku 3 is retired; Anthropic published rounded cache rates for it
     # ($0.30 write / $0.03 read on a $0.25 input) rather than exact multiples.
     # Kept verbatim so old transcripts reprice to what was actually billed.
     ROUNDED_LEGACY = {"claude-3-haiku"}
 
-    def test_cache_read_is_tenth_of_input_except_51(self):
+    # Published cache-read multipliers that are NOT the usual 0.1x input.
+    CACHE_READ_EXCEPTIONS = {
+        "claude-fable-5-1": 0.025, "claude-mythos-5-1": 0.025, "claude-opus-5-5": 0.05,
+    }
+
+    def test_cache_read_is_tenth_of_input_except_listed(self):
         for key, m in t.MODELS.items():
             if key in self.ROUNDED_LEGACY:
                 continue
-            expected = 0.025 if key.endswith("-5-1") else 0.1
+            expected = self.CACHE_READ_EXCEPTIONS.get(key, 0.1)
             self.assertAlmostEqual(
                 m["cache_read"], m["input"] * expected, places=4,
                 msg=f"{key}: cache_read {m['cache_read']} != {expected}x input")
@@ -263,6 +287,82 @@ class EncoderTests(unittest.TestCase):
         self.assertEqual(t.encode_project_dir(p), p.replace("/", "-"))
 
 
+def _block(rid, out, inp=2, cr=50_000, model="claude-opus-5"):
+    """One streamed content block of request `rid` (Claude Code 2.1.27x writes a
+    usage per block; only the last block's output_tokens is final)."""
+    msg = _assistant(model=model, inp=inp, out=out, cr=cr)
+    msg["requestId"] = rid
+    return msg
+
+
+class RequestDedupTests(unittest.TestCase):
+    def test_streamed_blocks_of_one_request_count_once(self):
+        # Observed shape: out=8 on early blocks, final 642 on the last block.
+        msgs = [_block("req_1", 8), _block("req_1", 8), _block("req_1", 642)]
+        pairs = t.get_all_assistant_usages(msgs)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][0]["output_tokens"], 642)
+        self.assertEqual(pairs[0][0]["cache_read_input_tokens"], 50_000)
+
+    def test_distinct_requests_with_identical_usage_both_count(self):
+        # Two real calls that happen to report the same numbers must not merge.
+        pairs = t.get_all_assistant_usages([_block("req_1", 10), _block("req_2", 10)])
+        self.assertEqual(len(pairs), 2)
+
+    def test_message_id_used_when_request_id_missing(self):
+        a, b = _assistant(out=8), _assistant(out=300)
+        a["message"]["id"] = b["message"]["id"] = "msg_1"
+        self.assertEqual(len(t.get_all_assistant_usages([a, b])), 1)
+
+    def test_legacy_rows_without_ids_keep_consecutive_tuple_dedup(self):
+        pairs = t.get_all_assistant_usages([_assistant(), _assistant(), _assistant(out=7)])
+        self.assertEqual(len(pairs), 2)
+
+
+class IterationBillingTests(unittest.TestCase):
+    """usage.iterations: top-level usage covers only the last iteration, so a
+    server-side model fallback (Fable 5 → Opus 4.8) under-bills unless each
+    iteration is priced at its own model."""
+
+    def _fallback_msg(self):
+        cc = {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 100_000}
+        it = lambda typ, model, out: {  # noqa: E731
+            "type": typ, "model": model, "input_tokens": 2, "output_tokens": out,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 100_000,
+            "cache_creation": dict(cc)}
+        msg = _assistant(model="claude-opus-4-8", inp=2, out=2000, cc=100_000)
+        msg["requestId"] = "req_fb"
+        msg["message"]["usage"].update({
+            "cache_creation": dict(cc), "speed": "standard",
+            "iterations": [it("message", "claude-fable-5", 1000),
+                           it("fallback_message", "claude-opus-4-8", 2000)]})
+        return msg
+
+    def test_fallback_bills_both_models(self):
+        pairs = t.get_all_assistant_usages([self._fallback_msg()])
+        self.assertEqual([m for _, m in pairs], ["claude-fable-5", "claude-opus-4-8"])
+        _, cost, last_model = t.sum_usages(pairs)
+        fable = (2 * 10 + 1000 * 50 + 100_000 * 20) / 1e6
+        opus = (2 * 5 + 2000 * 25 + 100_000 * 10) / 1e6
+        self.assertAlmostEqual(cost, fable + opus, places=9)
+        self.assertEqual(last_model, "claude-opus-4-8")
+
+    def test_single_iteration_is_not_double_counted(self):
+        msg = _block("req_1", 500)
+        msg["message"]["usage"]["iterations"] = [{
+            "type": "message", "input_tokens": 2, "output_tokens": 500,
+            "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 0}]
+        pairs = t.get_all_assistant_usages([msg])
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1], "claude-opus-5")  # iteration w/o model inherits
+
+    def test_iteration_inherits_speed(self):
+        msg = self._fallback_msg()
+        msg["message"]["usage"]["speed"] = "fast"
+        pairs = t.get_all_assistant_usages([msg])
+        self.assertTrue(all(u.get("speed") == "fast" for u, _ in pairs))
+
+
 class SubagentAggregationTests(unittest.TestCase):
     def _make_session(self, tmp):
         proj = Path(tmp)
@@ -351,6 +451,74 @@ class RenderNoResetRegressionTests(unittest.TestCase):
             self.assertAlmostEqual(after["session"]["cost"], 1.23)
             # session_id is left as the Stop hook wrote it, not overwritten
             self.assertEqual(after["session_id"], "STOP-SESSION")
+
+
+class ModelModeDisplayTests(unittest.TestCase):
+    """Live `effort.level` / `fast_mode` (status-line stdin) are shown next to the
+    model: both change what a turn costs (fast = premium tier)."""
+
+    def _render(self, live):
+        status = RenderNoResetRegressionTests._status(None, "s")
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "abc123.json"
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            old_stdin, old_stdout = sys.stdin, sys.stdout
+            sys.stdin, sys.stdout = io.StringIO(json.dumps(live)), io.StringIO()
+            try:
+                t.render_mode([str(status_path)])
+                out = sys.stdout.getvalue()
+            finally:
+                sys.stdin, sys.stdout = old_stdin, old_stdout
+            return out, json.loads(status_path.read_text(encoding="utf-8"))
+
+    def test_effort_and_fast_are_merged_and_shown(self):
+        out, after = self._render({"model": {"id": "claude-opus-5-5"},
+                                   "effort": {"level": "medium"}, "fast_mode": True})
+        self.assertEqual((after["effort"], after["fast_mode"]), ("medium", True))
+        self.assertIn("Opus 5.5", out)
+        self.assertIn("medium", out)
+        self.assertIn("⚡", out)
+
+    def test_absent_fields_render_like_before(self):
+        out, after = self._render({"model": {"id": "claude-opus-5-5"}})
+        self.assertNotIn("⚡", out)
+        self.assertNotIn("effort", after)
+
+
+class AuditTests(unittest.TestCase):
+    """--audit flags transcript drift the price table / parser doesn't cover yet."""
+
+    def _acc(self, msgs):
+        acc = t.new_audit()
+        t.audit_transcript(msgs, acc)
+        return t.audit_issues(acc)
+
+    def test_clean_transcript_has_no_issues(self):
+        msg = _block("r1", 10, model="claude-haiku-4-5-20251001")
+        msg["message"]["usage"].update({"speed": "standard", "service_tier": "standard",
+                                        "inference_geo": "not_available"})
+        self.assertEqual(self._acc([msg]), [])
+
+    def test_unknown_model_is_flagged(self):
+        issues = self._acc([_block("r1", 10, model="claude-sonnet-6")])
+        self.assertTrue(any("claude-sonnet-6" in i for i in issues), issues)
+
+    def test_prefix_collision_is_flagged(self):
+        # A new "claude-opus-5-7" would silently bill as Opus 5 via substring match.
+        issues = self._acc([_block("r1", 10, model="claude-opus-5-7")])
+        self.assertTrue(any("claude-opus-5-7" in i and "Opus 5" in i for i in issues), issues)
+
+    def test_variant_and_synthetic_are_not_flagged(self):
+        self.assertEqual(self._acc([_block("r1", 10, model="claude-opus-5-5[1m]"),
+                                    _block("r2", 10, model="<synthetic>")]), [])
+
+    def test_new_usage_key_and_modifier_values_are_flagged(self):
+        msg = _block("r1", 10)
+        msg["message"]["usage"].update({"brand_new_tokens": 5, "inference_geo": "us",
+                                        "iterations": [{"type": "compaction"}, {"type": "message"}]})
+        issues = " ".join(self._acc([msg]))
+        for needle in ("brand_new_tokens", "inference_geo", "compaction"):
+            self.assertIn(needle, issues)
 
 
 class RepriceSessionTests(unittest.TestCase):

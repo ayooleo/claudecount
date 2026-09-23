@@ -77,7 +77,7 @@ VERSION=$(python3 "$HOOKS_DIR/token_tracker.py" --version 2>/dev/null | awk '{pr
 echo ""
 echo "✓ ClaudeCount ${VERSION:-installed}! Restart Claude Code to activate."
 echo ""
-echo "  Status bar shows: PROJECT 🌡️ ctx% ⚡ hit% │ Turn │ Sess │ Proj"
+echo "  Status bar shows: PROJECT model [⚡] effort 🌡️ ctx% 🎯 hit% │ Turn │ Sess │ Proj"
 echo ""
 echo "  Detailed report:"
 echo "    python3 ~/.claude/hooks/token_report.py           # current project"
