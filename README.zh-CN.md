@@ -14,7 +14,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 | 字段 | 含义 |
 |------|------|
 | **PROJECT NAME** | 当前活动项目（取目录名，转大写） |
-| **Model** | 当前模型名称与上下文窗口大小 |
+| **Model** | 当前模型名称、快速模式开启时的 `⚡`、effort 档位（如 `medium`）以及上下文窗口大小——均实时取自 Claude Code |
 | **🌡️ %** | 上下文窗口占用率 —— 绿 < 50%，蓝 50–74%，黄 75–89%，红 ≥ 90% |
 | **🎯 %** | 本次会话缓存命中率（`cache_read` / 总输入）—— 橙 < 50%，黄 50–74%，蓝 75–89%，绿 ≥ 90%；会话尚无输入时不显示 |
 | **🎫 N** | 项目级 token 总消耗（input + output + cache_read + cache_creation 之和）。父项目显示家庭合计（父 + 全部子项目），独立项目和子项目显示自身合计 |
@@ -28,7 +28,7 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |------|------|
 | `↑` | 输入 token 总量（非缓存 + cache_creation + cache_read） |
 | `↓` | 生成的输出 token |
-| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费，Fable/Mythos 5.1 为 0.025×） |
+| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费；Opus 5.5 为 0.05×，Fable/Mythos 5.1 为 0.025×） |
 
 ## 安装
 
@@ -178,6 +178,7 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 |------|-------|--------|----------------|----------------|------------|
 | Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
+| Opus 5.5 | $4.00 | $20.00 | $5.00 | $8.00 | $0.20 † |
 | Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
@@ -189,11 +190,22 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-价格按每百万 token 计。**Fable 5.1 / 5**、**Mythos 5.1 / 5**、**Opus 5 / 4.8 / 4.7 / 4.6**、**Sonnet 5** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-09-12 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+价格按每百万 token 计。**Fable 5.1 / 5**、**Mythos 5.1 / 5**、**Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**、**Sonnet 5** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-09-22 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
 
-† **Fable 5.1 / Mythos 5.1** 的缓存读取按输入价的 0.025× 计费，而非通常的 0.1×。其他模型均为 0.1×。
+† 三个模型的缓存读取低于通常的 0.1×：**Opus 5.5** 为 0.05×（$0.20），**Fable 5.1 / Mythos 5.1** 为 0.025×（$0.25）。其他模型均为 0.1×。
 
-**快速模式**（fast mode，research preview，仅 Claude API）对 **Opus 5 / Opus 4.8** 按每百万 token $10 / $50 计费。ClaudeCount 通过 transcript 中的 `usage.speed == "fast"` 自动识别并套用该溢价档；缓存倍率在快速模式基价之上叠加。
+**快速模式**（fast mode，research preview）对 **Opus 5.5** 按 $8 / $40、对 **Opus 5 / Opus 4.8** 按 $10 / $50（每百万 token）计费。ClaudeCount 通过 transcript 中的 `usage.speed == "fast"` 自动识别并套用该溢价档；缓存倍率在快速模式基价之上叠加。
+
+**服务端模型回退（fallback）。** 请求中途回退到另一个模型时（Claude Code 2.1.27x 会在 `usage.iterations` 中记录例如 `claude-fable-5` → `claude-opus-4-8`），两次尝试都会计费，各按各自模型的价格。顶层 `usage` 只覆盖最后一次尝试，因此 ClaudeCount 会逐个 iteration 分别计价。
+
+### `--audit` — 检查追踪器尚未覆盖的 Claude 变化
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --audit             # 最近 14 天的 transcript
+python3 ~/.claude/hooks/token_tracker.py --audit --days 60
+```
+
+扫描近期 transcript，以 `ISSUE:` 行报告：没有价格条目的模型 id（包括只靠前缀匹配到旧模型的，例如新的 `claude-opus-5-7` 会被当成 Opus 5 计费）、新的 `usage` 字段、新的 `usage.iterations` 类型，以及 ClaudeCount 未应用的计价修饰项。`audit: 0 issue(s)` 表示价目表和解析器已覆盖所见的一切。Claude 更新后，`claudecount-sync-claude` skill 会运行它。
 
 ### `--reprice` — 重算历史费用
 
@@ -221,6 +233,21 @@ transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调�
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.5.0] — 2026-09-22
+
+#### 新增
+- **Claude Opus 5.5**（`claude-opus-5-5`，Claude Code 2.1.280 的默认 Opus）：每百万 token $4 / $20，1M 上下文。缓存写入 5m $5.00 / 1h $8.00，缓存读取 **$0.20（输入价的 0.05×）**。快速模式 $8 / $40
+- **状态栏显示 effort 档位与快速模式**，位于模型名旁（`Opus 5.5 ⚡ medium 1M`），实时读取 Claude Code status-line 的 `effort.level` / `fast_mode`
+- **`--audit`**：报告追踪器尚未覆盖的 transcript 变化（未知或仅前缀匹配的模型、新 usage 字段、新 iteration 类型、未应用的计价修饰项）
+
+#### 修复
+- **流式响应被重复计算 2–3 次。** Claude Code 每个内容块写一行 transcript，前面几行带的是流式中途的 `output_tokens`（例如先 8、最后一行 642）。旧的"连续相同 usage"去重因此保留了每一行，按块数重复计入该请求的输入与缓存 token。现在按 `requestId`（缺失时退回 `message.id`）去重，只保留最终那一行。在本仓库作者的数据上，`--reprice` 使累计总额变动 −$109（−0.7%）
+- **Opus 5.5 被当作 Opus 5 计费和显示**（`claude-opus-5` 前缀匹配所致），输入/输出多算约 25%，缓存读取多算 2.5 倍
+- **服务端模型回退漏计。** 以前只对最终尝试（`fallback_message`）计价；现在 `usage.iterations` 中每一项都按其自身模型价格计费
+
+#### 已知限制
+- advisor 模型的 token（transcript 中 `advisorModel` 与 `model` 不同时）不会写入 transcript，因此无法统计。`--audit` 会报告受影响的调用数
 
 ### [1.4.0] — 2026-09-12
 

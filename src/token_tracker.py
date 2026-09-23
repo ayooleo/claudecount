@@ -6,10 +6,11 @@ import sys
 import os
 import re
 import hashlib
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -52,7 +53,12 @@ MODELS = {
     "claude-mythos-5-1": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25, "context": 1_000_000, "name": "Mythos 5.1"},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Fable 5"},
     "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Mythos 5"},
-    # Opus 5 / Sonnet 5 — current default lineup. `fast` is the research-preview fast
+    # Opus 5.5 — default Opus from Claude Code 2.1.280. Verified 2026-09-22 against the
+    # pricing page. Cache reads/refreshes bill at 0.05x input ($0.20), NOT 0.1x. Fast mode
+    # is $8/$40; its cache rates are derived (the page says multipliers stack on the fast base).
+    "claude-opus-5-5":   {"input":  4.00, "output": 20.00, "cache_write_5m":  5.00, "cache_write_1h":  8.00, "cache_read": 0.20, "context": 1_000_000, "name": "Opus 5.5",
+                          "fast": {"input":  8.00, "output": 40.00, "cache_write_5m": 10.00, "cache_write_1h": 16.00, "cache_read": 0.40}},
+    # Opus 5 / Sonnet 5. `fast` is the research-preview fast
     # mode premium tier (usage.speed == "fast"), Opus 5 / Opus 4.8 only.
     "claude-opus-5":     {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 5",
                           "fast": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00}},
@@ -115,7 +121,7 @@ _PRICE_KEYS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_rea
 
 def get_pricing(model: str, overrides: dict = None, speed: str = None) -> dict:
     m = _resolve_model(model)
-    # Fast mode (research preview, Opus 5 / Opus 4.8) bills at a premium tier.
+    # Fast mode (research preview, Opus 5.5 / Opus 5 / Opus 4.8) bills at a premium tier.
     # Cache multipliers stack on top of the fast base, so the whole block is swapped.
     if speed == "fast" and "fast" in m:
         m = m["fast"]
@@ -273,30 +279,66 @@ def _usage_key(usage: dict) -> tuple:
     )
 
 
-def deduplicate_api_calls(pairs: list) -> list:
-    """Remove consecutive assistant messages with identical usage (same API call, multiple content blocks)."""
-    result = []
-    for usage, model in pairs:
-        if result and _usage_key(usage) == _usage_key(result[-1][0]):
-            continue
-        result.append((usage, model))
-    return result
-
-
 def count_turns(messages: list) -> int:
     """Count TUI turns = number of real human messages in the transcript."""
     return sum(1 for m in messages if _is_user(m) and is_human_message(m))
 
 
+def _request_key(msg: dict):
+    """Stable per-API-call id: the transcript's requestId, else message.id."""
+    inner = msg.get("message")
+    return msg.get("requestId") or (inner.get("id") if isinstance(inner, dict) else None)
+
+
+def expand_iterations(usage: dict, model: str) -> list:
+    """Split a usage carrying `iterations` into one (usage, model) pair per iteration.
+
+    The top-level usage only reflects the *last* iteration. On a server-side model
+    fallback (seen 2.1.27x: iterations = [message @ claude-fable-5,
+    fallback_message @ claude-opus-4-8]) the first attempt is billed too, at its
+    own model's rates, and would otherwise vanish. Iterations without a `model`
+    inherit the message's; `speed` is a request-level field and is carried over.
+    A single iteration equals the top-level usage, so it's returned unchanged."""
+    iters = usage.get("iterations")
+    if not isinstance(iters, list) or len(iters) < 2:
+        return [(usage, model)]
+    out = []
+    for it in iters:
+        if not isinstance(it, dict):
+            continue
+        u = {k: v for k, v in it.items() if k not in ("type", "model")}
+        if "speed" in usage:
+            u["speed"] = usage["speed"]
+        out.append((u, it.get("model") or model))
+    return out or [(usage, model)]
+
+
 def _collect_assistant_usages(messages) -> list:
-    results = []
+    # Claude Code writes one transcript row per content block, each with a usage;
+    # only the last row of a request has the final output_tokens (earlier ones are
+    # mid-stream, e.g. 8 then 642). Keying on the request id and keeping the last
+    # row counts each call once. Rows without an id fall back to the consecutive
+    # identical-tuple dedup (older transcripts).
+    results, index_of, prev_keyless = [], {}, None
     for msg in messages:
         if not _is_assistant(msg):
             continue
         usage, model = extract_usage_from_msg(msg)
-        if usage and (usage.get("output_tokens", 0) > 0 or usage.get("input_tokens", 0) > 0):
-            results.append((usage, model))
-    return deduplicate_api_calls(results)
+        if not (usage and (usage.get("output_tokens", 0) > 0 or usage.get("input_tokens", 0) > 0)):
+            continue
+        key = _request_key(msg)
+        if key is None:
+            if prev_keyless == _usage_key(usage):
+                continue
+            prev_keyless = _usage_key(usage)
+        elif key in index_of:
+            results[index_of[key]] = (usage, model)
+            continue
+        else:
+            prev_keyless = None
+            index_of[key] = len(results)
+        results.append((usage, model))
+    return [pair for usage, model in results for pair in expand_iterations(usage, model)]
 
 
 def get_last_turn_usages(messages: list) -> list:
@@ -652,7 +694,10 @@ def _render_header(status: dict, proj_tok_total: int = 0) -> str:
     # 🎫 = project-total token consumption. Family aggregate for parents,
     # own total for standalone/sub-projects. Caller pre-computes the int.
     tok_str = f" 🎫 {_fmt_tok(proj_tok_total)}" if proj_tok_total else ""
-    return header + f" {_GRY}{model}{_R}{win_str}{cw_str}{hit_str}{tok_str}"
+    fast_str   = f" {_YLW}⚡{_R}" if status.get("fast_mode") else ""
+    effort_str = f" {_GRY}{status['effort']}{_R}" if status.get("effort") else ""
+    return (header + f" {_GRY}{model}{_R}{fast_str}{effort_str}{win_str}"
+            f"{cw_str}{hit_str}{tok_str}")
 
 
 def _render_turn_segment(t: dict) -> str:
@@ -916,6 +961,18 @@ def render_mode(argv: list):
     if new_model and current_model != new_model:
         status["model"] = new_model
         current_model = new_model
+        changed = True
+
+    # Effort level and fast mode (status-line fields, Claude Code 2.1.2xx) both
+    # change what the next call costs, so they're shown beside the model. Only
+    # present keys are merged; an absent key leaves the stored value alone.
+    live_effort = live.get("effort")
+    if isinstance(live_effort, dict) and live_effort.get("level"):
+        if status.get("effort") != live_effort["level"]:
+            status["effort"] = live_effort["level"]
+            changed = True
+    if isinstance(live.get("fast_mode"), bool) and status.get("fast_mode") != live["fast_mode"]:
+        status["fast_mode"] = live["fast_mode"]
         changed = True
 
     ctx = status.setdefault("context", {})
@@ -1618,6 +1675,127 @@ def import_mode(argv: list):
           f"skipped {skipped} already-tracked, {empty} empty")
 
 
+# --- --audit: detect Claude Code / API drift the tracker doesn't cover yet ------
+# Everything the tracker knows how to bill. A usage key, iteration type or
+# modifier value outside these sets means Claude changed something and MODELS /
+# calc_cost / expand_iterations may need an update (see the claudecount-sync-claude skill).
+_KNOWN_USAGE_KEYS = {
+    "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+    "cache_creation", "iterations", "speed", "service_tier", "inference_geo",
+    "server_tool_use", "output_tokens_details",
+}
+_KNOWN_ITERATION_TYPES = {"message", "fallback_message"}
+_BILLED_AS_IS = {  # modifier values that leave list price unchanged (or are handled)
+    "speed": {"standard", "fast", None},
+    "service_tier": {"standard", None},
+    "inference_geo": {"not_available", None},
+}
+
+
+def new_audit() -> dict:
+    return {"models": Counter(), "usage_keys": Counter(), "iteration_types": Counter(),
+            "modifiers": Counter(), "web_search": 0, "advisor": Counter(),
+            "versions": Counter(), "files": 0, "calls": 0}
+
+
+def _normalize_model_id(model: str) -> str:
+    """Strip what _resolve_model tolerates: a `[1m]` variant, a -YYYYMMDD date."""
+    return re.sub(r"-\d{8}$", "", re.sub(r"\[.*\]$", "", model))
+
+
+def audit_transcript(messages: list, acc: dict) -> None:
+    acc["files"] += 1
+    for msg in messages:
+        if msg.get("version"):
+            acc["versions"][msg["version"]] += 1
+        if not _is_assistant(msg):
+            continue
+        usage, model = extract_usage_from_msg(msg)
+        if not usage:
+            continue
+        acc["calls"] += 1
+        acc["models"][model] += 1
+        adv = msg.get("advisorModel")
+        if adv and adv != model:
+            acc["advisor"][(model, adv)] += 1
+        for key in usage:
+            acc["usage_keys"][key] += 1
+        for key, ok in _BILLED_AS_IS.items():
+            if usage.get(key) not in ok:
+                acc["modifiers"][(key, usage.get(key))] += 1
+        stu = usage.get("server_tool_use") or {}
+        acc["web_search"] += stu.get("web_search_requests", 0) or 0
+        for it in usage.get("iterations") or []:
+            if isinstance(it, dict):
+                acc["iteration_types"][it.get("type")] += 1
+                if it.get("model"):
+                    acc["models"][it["model"]] += 1
+
+
+def audit_issues(acc: dict) -> list:
+    """Human-readable problems found in `acc`; [] means nothing to update."""
+    issues = []
+    for model, n in acc["models"].most_common():
+        if not model or model.startswith("<"):
+            continue
+        m = _resolve_model(model)
+        if m is _DEFAULT_MODEL:
+            issues.append(f"unknown model {model} ({n} calls) — billed at the $3/$15 "
+                          f"default; add it to MODELS")
+        elif _normalize_model_id(model) not in MODELS:
+            issues.append(f"model {model} ({n} calls) has no MODELS entry — billed and shown "
+                          f"as {m['name']} via prefix match; add its own entry")
+    for key, n in acc["usage_keys"].most_common():
+        if key not in _KNOWN_USAGE_KEYS:
+            issues.append(f"new usage field `{key}` ({n} calls) — check whether it affects billing")
+    for typ, n in acc["iteration_types"].most_common():
+        if typ not in _KNOWN_ITERATION_TYPES:
+            issues.append(f"new usage.iterations type `{typ}` ({n}) — expand_iterations "
+                          f"bills it at its own model; confirm that's right")
+    for (key, val), n in acc["modifiers"].most_common():
+        issues.append(f"usage.{key} = {val!r} ({n} calls) — a pricing modifier calc_cost does not apply")
+    if acc["web_search"]:
+        issues.append(f"{acc['web_search']} server-side web searches ($10/1k) are not billed")
+    return issues
+
+
+def audit_mode(argv: list):
+    """One-shot: scan recent transcripts (default 14 days; --days N) for drift."""
+    days = 14
+    if "--days" in argv:
+        try:
+            days = int(argv[argv.index("--days") + 1])
+        except (IndexError, ValueError):
+            pass
+    root = Path.home() / ".claude" / "projects"
+    cutoff = datetime.now().timestamp() - days * 86400
+    acc = new_audit()
+    for p in (root.glob("**/*.jsonl") if root.exists() else []):
+        try:
+            if p.stat().st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        audit_transcript(read_transcript(str(p)), acc)
+
+    print(f"ClaudeCount {__version__} audit — {acc['files']} transcripts, "
+          f"{acc['calls']} assistant rows, last {days} days")
+    versions = sorted(acc["versions"],
+                      key=lambda v: [int(x) if x.isdigit() else 0 for x in v.split(".")])
+    if versions:
+        print(f"claude code versions seen: {versions[0]} … {versions[-1]}")
+    print("models: " + ", ".join(f"{m} → {fmt_model(m)} ×{n}"
+                                 for m, n in acc["models"].most_common()
+                                 if m and not m.startswith("<")))
+    for (main_model, adv), n in acc["advisor"].most_common():
+        print(f"note: {n} rows used advisor {adv} under {main_model} — advisor tokens are "
+              f"not in the transcript, so they can't be billed")
+    issues = audit_issues(acc)
+    for issue in issues:
+        print(f"ISSUE: {issue}")
+    print(f"audit: {len(issues)} issue(s)")
+
+
 def main():
     if "--version" in sys.argv or "-V" in sys.argv:
         print(f"ClaudeCount {__version__}")
@@ -1645,6 +1823,9 @@ def main():
         return
     if "--import" in sys.argv:
         import_mode(sys.argv[sys.argv.index("--import") + 1:])
+        return
+    if "--audit" in sys.argv:
+        audit_mode(sys.argv[sys.argv.index("--audit") + 1:])
         return
     if "--list-projects" in sys.argv:
         list_projects_mode()
