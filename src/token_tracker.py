@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -829,11 +829,66 @@ def render_status_line(status: dict) -> str:
     ])
 
 
+# Session-scoped status overlay. status/<pid>.json is per *project*, but several
+# Claude Code sessions can run in one project at once (background `--bg`
+# sessions, worktrees, `claude agents`). Turn/Sess/context are per *session*, so
+# each session also gets status/sessions/<session_id>.json holding just those
+# fields; render overlays it on the project file. Without it, whichever session
+# last hit Stop (or opened and reset) owned every other session's bar.
+_SESSION_KEYS = ("session_id", "last_turn", "session", "context")
+_SESSION_OVERLAY_MAX_AGE_DAYS = 30
+
+
+def _session_status_file(session_id: str) -> Path:
+    return STATUS_DIR / "sessions" / f"{session_id}.json"
+
+
+def _read_session_status(session_id: str) -> dict:
+    if not session_id:
+        return {}
+    try:
+        return json.loads(_session_status_file(session_id).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_session_status(status: dict) -> None:
+    sid = status.get("session_id")
+    if not sid:
+        return
+    overlay = {k: status[k] for k in _SESSION_KEYS if k in status}
+    overlay["pid"] = status.get("pid", "")
+    overlay["updated"] = datetime.now(timezone.utc).isoformat()
+    f = _session_status_file(sid)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(overlay, ensure_ascii=False), encoding="utf-8")
+
+
+def _prune_session_status() -> None:
+    """Drop overlays of sessions untouched for a month — one small file per
+    session would otherwise accumulate forever."""
+    cutoff = datetime.now().timestamp() - _SESSION_OVERLAY_MAX_AGE_DAYS * 86400
+    for f in (STATUS_DIR / "sessions").glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
 def _reset_session_state(session_id: str, cwd: str, model_hint: str = ""):
-    """Reset turn/sess/context for a new session. Idempotent — only acts on new session_id.
-    Used by both SessionStart and UserPromptSubmit hooks. SessionStart's `model` hook field
-    seeds the model display before the first status-line render arrives."""
+    """Reset turn/sess/context for a new session. Idempotent — only acts on a session
+    that has no overlay yet. Used by both SessionStart and UserPromptSubmit hooks.
+    SessionStart's `model` hook field seeds the model display before the first
+    status-line render arrives.
+
+    The zeroed Turn/Sess go into the session's own overlay. The project status
+    file only gets them when it has no session data yet (brand-new project) —
+    zeroing it would blank the bar of every other live session in the project."""
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    if _session_status_file(session_id).exists():
+        return
+    _prune_session_status()
     pid = resolve_pid_for_cwd(cwd)
     status_file = STATUS_DIR / f"{pid}.json"
 
@@ -855,29 +910,34 @@ def _reset_session_state(session_id: str, cwd: str, model_hint: str = ""):
     except Exception:
         status = {}
 
-    if session_id == status.get("session_id", ""):
-        return
-
     # Preserve window_size from live runtime data (written by render_mode from Claude Code stdin).
     live_win_size = status.get("context", {}).get("window_size", 0)
 
-    status["session_id"] = session_id
+    fresh = {
+        "session_id": session_id,
+        "pid": pid,
+        "last_turn": {
+            "cost": 0, "input_tokens": 0, "cache_creation": 0,
+            "cache_read": 0, "output_tokens": 0,
+        },
+        "session": {
+            "cost": 0, "input_tokens": 0, "cache_creation": 0,
+            "cache_read": 0, "output_tokens": 0,
+            "started": datetime.now(timezone.utc).isoformat(),
+            "active_minutes": 0,
+            "turn_count": 0,
+        },
+        "context": {"tokens": 0, "window_size": live_win_size, "pct": 0},
+    }
+    _write_session_status(fresh)
+
     status["project_name"] = display_name
     status["cwd"] = display_cwd
     status["pid"] = pid
-    status["model"] = model_hint
-    status["last_turn"] = {
-        "cost": 0, "input_tokens": 0, "cache_creation": 0,
-        "cache_read": 0, "output_tokens": 0,
-    }
-    status["session"] = {
-        "cost": 0, "input_tokens": 0, "cache_creation": 0,
-        "cache_read": 0, "output_tokens": 0,
-        "started": datetime.now(timezone.utc).isoformat(),
-        "active_minutes": 0,
-        "turn_count": 0,
-    }
-    status["context"] = {"tokens": 0, "window_size": live_win_size, "pct": 0}
+    if model_hint or "model" not in status:
+        status["model"] = model_hint
+    if "session" not in status:
+        status.update(fresh)
 
     # Refresh parent_pid / parent_name from project file in case the link
     # changed since this status was last written.
@@ -950,6 +1010,13 @@ def render_mode(argv: list):
         print("💰 --")
         return
 
+    # Turn/Sess/context are this session's own, not whichever session last wrote
+    # the shared project file. No overlay yet (session predates the upgrade)
+    # → keep the project file's copy, as before.
+    live_sid = live.get("session_id", "")
+    overlay = _read_session_status(live_sid)
+    status.update({k: overlay[k] for k in _SESSION_KEYS if k in overlay})
+
     # Live data from Claude Code is authoritative. Our model dict is fallback only.
     # Brief transient on mid-session /model switch self-heals in one render cycle.
     live_model = live.get("model") or {}
@@ -1010,6 +1077,8 @@ def render_mode(argv: list):
 
     if changed:
         try:
+            if overlay:
+                _write_session_status(status)
             status_json = json.dumps(status, ensure_ascii=False)
             Path(status_path).write_text(status_json, encoding="utf-8")
             # Mirror to global current.json so cross-project tools see fresh state
@@ -1906,11 +1975,12 @@ def main():
             cwd = anc.get("cwd") or cwd
         except Exception:
             pass
-    stored_status = {}
-    try:
-        stored_status = json.loads((STATUS_DIR / f"{pid}.json").read_text(encoding="utf-8"))
-    except Exception:
-        pass
+    stored_status = _read_session_status(session_id)
+    if not stored_status:
+        try:
+            stored_status = json.loads((STATUS_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
     ctx_win_size = (stored_status.get("context", {}).get("window_size")
                     or get_context_window(current_model))
     last_api_usage = turn_usages[-1][0] if turn_usages else {}
@@ -1986,6 +2056,7 @@ def main():
     }
     _attach_parent(status, project)
 
+    _write_session_status(status)
     status_json = json.dumps(status, ensure_ascii=False)
     (STATUS_DIR / f"{pid}.json").write_text(status_json, encoding="utf-8")
     (STATUS_DIR / "current.json").write_text(status_json, encoding="utf-8")

@@ -13,6 +13,8 @@ worktree sessions).
 """
 
 import io
+import os
+import re
 import json
 import sys
 import tempfile
@@ -451,6 +453,140 @@ class RenderNoResetRegressionTests(unittest.TestCase):
             self.assertAlmostEqual(after["session"]["cost"], 1.23)
             # session_id is left as the Stop hook wrote it, not overwritten
             self.assertEqual(after["session_id"], "STOP-SESSION")
+
+
+class ConcurrentSessionTests(unittest.TestCase):
+    """Several Claude Code sessions in one project (background `--bg` sessions,
+    worktrees) share status/<pid>.json. Each session's bar must still show its
+    own Turn/Sess — not whichever session last hit Stop or UserPromptSubmit."""
+
+    CWD = "/tmp/cc-demo-proj"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self._saved = (t.STATUS_DIR, t.DATA_DIR)
+        t.STATUS_DIR, t.DATA_DIR = base / "status", base / "projects"
+        t.STATUS_DIR.mkdir()
+        t.DATA_DIR.mkdir()
+        self.base = base
+
+    def tearDown(self):
+        t.STATUS_DIR, t.DATA_DIR = self._saved
+        self._tmp.cleanup()
+
+    def _run(self, fn, payload, argv=()):
+        old = sys.stdin, sys.stdout, sys.argv
+        sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+        sys.argv = ["token_tracker.py", *argv]
+        try:
+            fn()
+            return sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.argv = old
+
+    def _stop(self, sid, turns):
+        msgs = []
+        for i in range(turns):
+            msgs += [_human(f"q{i}"), _assistant(inp=1000 * (i + 1), out=100)]
+        tr = self.base / f"{sid}.jsonl"
+        tr.write_text("\n".join(json.dumps(m) for m in msgs), encoding="utf-8")
+        self._run(t.main, {"session_id": sid, "transcript_path": str(tr), "cwd": self.CWD})
+
+    def _render(self, sid, cwd=None):
+        pid = t.project_id(self.CWD)
+        live = {"session_id": sid, "cwd": cwd or self.CWD,
+                "model": {"id": "claude-opus-4-8"}}
+        out = self._run(lambda: t.render_mode([str(t.STATUS_DIR / f"{pid}.json")]), live)
+        # Only the Sess segment — Proj also carries a "N turns" count.
+        return out.split("Sess")[1].split("Proj")[0]
+
+    def test_other_sessions_stop_does_not_overwrite_idle_session(self):
+        self._stop("SESS-A", turns=2)
+        self._stop("SESS-B", turns=5)   # B finishes a turn while A sits idle
+        self.assertIn("2 turns", self._render("SESS-A"))
+        self.assertIn("5 turns", self._render("SESS-B"))
+
+    def test_new_session_prompt_does_not_zero_idle_session(self):
+        self._stop("SESS-A", turns=3)
+        # Another session opens and submits its first prompt in the same project.
+        self._run(t.pre_turn_mode, {"session_id": "SESS-C", "cwd": self.CWD})
+        self.assertIn("3 turns", self._render("SESS-A"))
+        self.assertNotIn("turns", self._render("SESS-C"))
+
+    def test_reset_is_idempotent_for_same_session(self):
+        self._stop("SESS-A", turns=3)
+        self._run(t.pre_turn_mode, {"session_id": "SESS-A", "cwd": self.CWD})
+        self.assertIn("3 turns", self._render("SESS-A"))
+
+    def test_session_overlay_records_stop_hook_project(self):
+        self._stop("SESS-A", turns=1)
+        overlay = json.loads((t.STATUS_DIR / "sessions" / "SESS-A.json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(overlay["pid"], t.project_id(self.CWD))
+
+
+class StatusLineRoutingTests(unittest.TestCase):
+    """token_status.sh picks which project's status file the bar shows. Claude
+    Code's status-line `cwd` follows the shell (e.g. a `cd` into a worktree or a
+    nested tracked project), so routing by it made the bar jump to another
+    project's stale session. The session's own overlay (written by the hooks) —
+    else the fixed `workspace.project_dir` — decides instead."""
+
+    SRC = Path(__file__).resolve().parent.parent / "src"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        hooks = self.home / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "token_tracker.py").symlink_to(self.SRC / "token_tracker.py")
+        self.usage = self.home / ".claude" / "token_usage"
+        for d in ("projects", "status/sessions"):
+            (self.usage / d).mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _project(self, cwd, name, sid=None):
+        pid = t.project_id(cwd)
+        (self.usage / "projects" / f"{pid}.json").write_text(
+            json.dumps({"pid": pid, "name": name, "cwd": cwd, "sessions": {}}))
+        status = RenderNoResetRegressionTests._status(None, sid or f"old-{name}")
+        status.update(project_name=name, cwd=cwd, pid=pid)
+        (self.usage / "status" / f"{pid}.json").write_text(json.dumps(status))
+        return pid
+
+    def _bar(self, live):
+        import subprocess
+        env = dict(os.environ, HOME=str(self.home))
+        out = subprocess.run(["bash", str(self.SRC / "token_status.sh")],
+                             input=json.dumps(live), capture_output=True,
+                             text=True, env=env).stdout
+        return re.sub(r"\x1b\[[0-9;]*m", "", out)
+
+    def test_drifted_cwd_keeps_session_project(self):
+        home_pid = self._project("/w/outer", "outer")
+        self._project("/w/outer/inner", "inner")
+        (self.usage / "status" / "sessions" / "S1.json").write_text(
+            json.dumps({"session_id": "S1", "pid": home_pid}))
+        bar = self._bar({"session_id": "S1", "cwd": "/w/outer/inner",
+                         "workspace": {"current_dir": "/w/outer/inner",
+                                       "project_dir": "/w/outer"}})
+        self.assertTrue(bar.startswith("OUTER"), bar)
+
+    def test_no_overlay_routes_by_project_dir_not_cwd(self):
+        self._project("/w/outer", "outer")
+        self._project("/w/outer/inner", "inner")
+        bar = self._bar({"session_id": "S2", "cwd": "/w/outer/inner",
+                         "workspace": {"current_dir": "/w/outer/inner",
+                                       "project_dir": "/w/outer"}})
+        self.assertTrue(bar.startswith("OUTER"), bar)
+
+    def test_old_payload_without_project_dir_still_routes_by_cwd(self):
+        self._project("/w/outer", "outer")
+        bar = self._bar({"session_id": "S3", "cwd": "/w/outer"})
+        self.assertTrue(bar.startswith("OUTER"), bar)
 
 
 class ModelModeDisplayTests(unittest.TestCase):

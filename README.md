@@ -234,11 +234,19 @@ from a flat token total would corrupt any session that mixed models. Idempotent.
 ~/.claude/token_usage/
 ├── projects/   # per-project history (one JSON per project)
 └── status/     # live status snapshots (current.json read by status bar)
+    └── sessions/   # per-session Turn / Sess overlay (one JSON per session)
 ```
 
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.5.1] — 2026-09-30
+
+#### Fixed
+- **Turn / Sess showed another session's numbers (or $0) while a session sat idle.** The live status file was one per *project*, but Turn / Sess / context belong to a *session*, and Claude Code now routinely runs several sessions in one project (background `--bg` sessions, worktrees, `claude agents`). Whichever session last finished a turn overwrote every other session's bar, and a session merely *opening* in the same project zeroed it. Each session now also gets `status/sessions/<session_id>.json` for its own Turn / Sess / context, overlaid on the project file at render time; project totals are unchanged. Overlays untouched for 30 days are pruned automatically
+- **The bar jumped to another project after a `cd`.** Claude Code's status-line `cwd` now follows the shell (e.g. into a worktree or a nested tracked project), so `token_status.sh` routed to that project's stale status. It now routes by the project the session is recorded under, else `workspace.project_dir` (the launch directory)
+- The v1.3.0 note attributing the frozen bar to "a status-line `session_id` that differs from the Stop hook's" was a misdiagnosis — the two ids match; the cause was the shared status file fixed above
 
 ### [1.5.0] — 2026-09-22
 
