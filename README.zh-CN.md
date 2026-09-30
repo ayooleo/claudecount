@@ -228,11 +228,19 @@ transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调�
 ~/.claude/token_usage/
 ├── projects/   # 每个项目的历史数据（每个项目一个 JSON 文件）
 └── status/     # 实时状态快照（current.json 由状态栏读取）
+    └── sessions/   # 每个会话自己的 Turn / Sess 叠加层（每会话一个 JSON）
 ```
 
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.5.1] — 2026-09-30
+
+#### 修复
+- **会话空闲时，Turn / Sess 显示的是别的会话的数据（或 $0）。** 实时状态文件原先是一个*项目*一份，而 Turn / Sess / 上下文属于*会话*；如今 Claude Code 常在同一项目里同时跑多个会话（后台 `--bg` 会话、worktree、`claude agents`）。任何一个会话结束一轮都会覆盖其他会话的状态栏，同项目里新开一个会话甚至会把它清零。现在每个会话另有 `status/sessions/<session_id>.json` 保存自己的 Turn / Sess / 上下文，渲染时叠加在项目文件上；项目累计不受影响。30 天未更新的会话文件自动清理
+- **`cd` 之后状态栏跳到别的项目。** Claude Code 状态栏输入里的 `cwd` 现在会跟随 shell（例如进入 worktree 或嵌套的已追踪项目），`token_status.sh` 因此读到那个项目的旧状态。现在按该会话实际记账的项目定位，其次用 `workspace.project_dir`（启动目录）
+- v1.3.0 把状态栏冻结归因于"状态栏的 `session_id` 与 Stop hook 的不一致"，这是误判：两者其实相同，真正原因是上面修复的共享状态文件
 
 ### [1.5.0] — 2026-09-22
 
