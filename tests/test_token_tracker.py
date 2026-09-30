@@ -470,9 +470,14 @@ class ConcurrentSessionTests(unittest.TestCase):
         t.STATUS_DIR.mkdir()
         t.DATA_DIR.mkdir()
         self.base = base
+        # Hooks see Claude Code's CLAUDE_PROJECT_DIR; keep tests independent of
+        # whatever environment runs them.
+        self._saved_env = os.environ.pop("CLAUDE_PROJECT_DIR", None)
 
     def tearDown(self):
         t.STATUS_DIR, t.DATA_DIR = self._saved
+        if self._saved_env is not None:
+            os.environ["CLAUDE_PROJECT_DIR"] = self._saved_env
         self._tmp.cleanup()
 
     def _run(self, fn, payload, argv=()):
@@ -519,11 +524,139 @@ class ConcurrentSessionTests(unittest.TestCase):
         self._run(t.pre_turn_mode, {"session_id": "SESS-A", "cwd": self.CWD})
         self.assertIn("3 turns", self._render("SESS-A"))
 
+    def _sessions_of(self, cwd):
+        f = t.DATA_DIR / f"{t.project_id(cwd)}.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+    def _track(self, cwd, name):
+        pid = t.project_id(cwd)
+        (t.DATA_DIR / f"{pid}.json").write_text(
+            json.dumps({"pid": pid, "name": name, "cwd": cwd, "sessions": {}}))
+
+    def test_stop_after_cd_stays_in_launch_project(self):
+        # Session launched in CWD, then `cd`'d into a separately tracked
+        # project before a turn ended: it must not be recorded twice.
+        inner = self.CWD + "/inner"
+        self._track(self.CWD, "cc-demo-proj")
+        self._track(inner, "inner")
+        self._run(t.session_start_mode, {"session_id": "SESS-A", "cwd": self.CWD})
+        self._stop("SESS-A", turns=1)
+        old = self.CWD
+        self.CWD = inner
+        try:
+            self._stop("SESS-A", turns=2)
+        finally:
+            self.CWD = old
+        self.assertEqual(self._sessions_of(self.CWD)["sessions"]["SESS-A"]["turn_count"], 2)
+        self.assertEqual(self._sessions_of(self.CWD)["name"], "cc-demo-proj")
+        self.assertNotIn("SESS-A", self._sessions_of(inner)["sessions"])
+
+    def test_stop_without_overlay_uses_claude_project_dir(self):
+        # A session that predates the overlay: fall back to the launch dir
+        # Claude Code exports to hooks, not the drifted hook `cwd`.
+        inner = self.CWD + "/inner"
+        self._track(self.CWD, "cc-demo-proj")
+        self._track(inner, "inner")
+        os.environ["CLAUDE_PROJECT_DIR"] = self.CWD   # tearDown restores
+        old_cwd, self.CWD = self.CWD, inner
+        try:
+            self._stop("SESS-B", turns=1)
+        finally:
+            self.CWD = old_cwd
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.assertIn("SESS-B", self._sessions_of(self.CWD)["sessions"])
+        self.assertNotIn("SESS-B", self._sessions_of(inner)["sessions"])
+
     def test_session_overlay_records_stop_hook_project(self):
         self._stop("SESS-A", turns=1)
         overlay = json.loads((t.STATUS_DIR / "sessions" / "SESS-A.json")
                              .read_text(encoding="utf-8"))
         self.assertEqual(overlay["pid"], t.project_id(self.CWD))
+
+
+class DedupSessionsTests(unittest.TestCase):
+    """--dedup-sessions: before v1.5.2 a session that `cd`'d into another tracked
+    project was recorded in both, counting its cost twice. Keep one copy — the
+    most complete one — in the project the session was launched in."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self._saved = (t.STATUS_DIR, t.DATA_DIR)
+        t.STATUS_DIR, t.DATA_DIR = base / "status", base / "projects"
+        t.STATUS_DIR.mkdir()
+        t.DATA_DIR.mkdir()
+        self.transcripts = base / "transcripts"
+        (self.transcripts / "enc").mkdir(parents=True)
+
+    def tearDown(self):
+        t.STATUS_DIR, t.DATA_DIR = self._saved
+        self._tmp.cleanup()
+
+    def _project(self, cwd, name, sessions):
+        pid = t.project_id(cwd)
+        data = {"pid": pid, "name": name, "cwd": cwd, "sessions": sessions}
+        t.recompute_project_totals(data)
+        t.save_project_data(t.DATA_DIR, pid, data)
+        return pid
+
+    def _sess(self, cost, turns):
+        return {"cost": cost, "turn_count": turns, "active_minutes": 1,
+                "started": "2026-09-30T10:00:00+00:00", "model": "claude-opus-5-5",
+                "tokens": {"input_tokens": 1, "output_tokens": 1,
+                           "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
+
+    def _transcript(self, sid, launch_cwd):
+        (self.transcripts / "enc" / f"{sid}.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": launch_cwd}) + "\n")
+
+    def _load(self, pid):
+        return json.loads((t.DATA_DIR / f"{pid}.json").read_text(encoding="utf-8"))
+
+    def _dedup(self, *argv):
+        old = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t.dedup_sessions_mode(list(argv), transcripts_root=self.transcripts,
+                                  history_path=self.transcripts / "history.jsonl")
+            return sys.stdout.getvalue()
+        finally:
+            sys.stdout = old
+
+    def test_keeps_most_complete_copy_in_launch_project(self):
+        outer = self._project("/w/outer", "outer", {"S": self._sess(2.0, 3)})
+        inner = self._project("/w/outer/inner", "inner", {"S": self._sess(3.5, 5)})
+        self._transcript("S", "/w/outer")
+        self._dedup("--yes")
+        self.assertEqual(self._load(outer)["sessions"]["S"]["turn_count"], 5)
+        self.assertAlmostEqual(self._load(outer)["project_total_cost"], 3.5)
+        self.assertNotIn("S", self._load(inner)["sessions"])
+        self.assertAlmostEqual(self._load(inner)["project_total_cost"], 0)
+
+    def test_preview_writes_nothing(self):
+        self._project("/w/outer", "outer", {"S": self._sess(2.0, 3)})
+        inner = self._project("/w/outer/inner", "inner", {"S": self._sess(3.5, 5)})
+        self._transcript("S", "/w/outer")
+        out = self._dedup()
+        self.assertIn("preview", out)
+        self.assertIn("S", self._load(inner)["sessions"])
+
+    def test_history_names_launch_project_when_transcript_is_gone(self):
+        # Transcripts are cleaned up after 30 days; history.jsonl keeps each
+        # prompt's `project` (the launch dir) much longer.
+        outer = self._project("/w/outer", "outer", {"S": self._sess(2.0, 3)})
+        inner = self._project("/w/outer/inner", "inner", {"S": self._sess(3.5, 5)})
+        (self.transcripts / "history.jsonl").write_text(
+            json.dumps({"sessionId": "S", "project": "/w/outer", "display": "hi"}) + "\n")
+        self._dedup("--yes")
+        self.assertEqual(self._load(outer)["sessions"]["S"]["turn_count"], 5)
+        self.assertNotIn("S", self._load(inner)["sessions"])
+
+    def test_without_transcript_or_history_is_skipped(self):
+        self._project("/w/outer", "outer", {"S": self._sess(2.0, 3)})
+        inner = self._project("/w/outer/inner", "inner", {"S": self._sess(3.5, 5)})
+        self._dedup("--yes")
+        self.assertIn("S", self._load(inner)["sessions"])
 
 
 class StatusLineRoutingTests(unittest.TestCase):

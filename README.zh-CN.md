@@ -222,6 +222,20 @@ transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调�
 除非其模型确实曾被错误计价：因为从扁平的 token 总量反推费用，会破坏任何混用了
 多个模型的 session。该命令幂等。
 
+### `--dedup-sessions` — 清除被两个项目重复记账的 session
+
+1.5.2 之前，session 中途 `cd` 进另一个已追踪项目（worktree、嵌套项目）后，会同时
+记在两个项目里，费用在两边的累计中都算一次。该命令只保留一份 —— 最完整的那份 ——
+放在 session 启动时所在的项目。启动目录从 transcript 读取；transcript 已被清理时，
+改从 Claude Code 的 `~/.claude/history.jsonl` 读取：
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --dedup-sessions          # 预览
+python3 ~/.claude/hooks/token_tracker.py --dedup-sessions --yes     # 应用
+```
+
+该命令幂等；无法确定启动目录的 session 会被列出并保持原样。
+
 ## 数据存储位置
 
 ```
@@ -234,6 +248,14 @@ transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调�
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.5.2] — 2026-09-30
+
+#### 修复
+- **同一 session 可能被记进两个项目，费用算两次。** hook 收到的是 shell 当前的 `cwd`，所以 `cd` 进另一个已追踪项目（worktree、嵌套项目）后结束的那一轮，会把整个 session 也记到那个项目里。现在 session 固定归属于它启动时的项目（`CLAUDE_PROJECT_DIR`，记录在它的 `status/sessions/` 叠加文件里）；按项目的价格覆盖也从该项目读取
+
+#### 新增
+- **`--dedup-sessions`** —— 清理已经被记进多个项目的 session（见上文）。在本仓库作者的数据上合并了 10 个 session，去掉 $155.00 的重复计费
 
 ### [1.5.1] — 2026-09-30
 

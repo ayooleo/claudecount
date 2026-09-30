@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -864,6 +864,21 @@ def _write_session_status(status: dict) -> None:
     f.write_text(json.dumps(overlay, ensure_ascii=False), encoding="utf-8")
 
 
+def _launch_cwd(hook_cwd: str) -> str:
+    """The session's launch directory. A hook's `cwd` follows the shell (a `cd`
+    into a worktree or another tracked project); Claude Code exports the launch
+    dir to hooks as CLAUDE_PROJECT_DIR."""
+    return os.environ.get("CLAUDE_PROJECT_DIR") or hook_cwd
+
+
+def _session_pid(session_id: str, launch_cwd: str) -> str:
+    """Project a session is recorded under. Bound once — by the first hook that
+    sees the session — and kept in its overlay, so a session never lands in
+    two projects (which double-counted it in both projects' totals)."""
+    return (_read_session_status(session_id).get("pid")
+            or resolve_pid_for_cwd(launch_cwd))
+
+
 def _prune_session_status() -> None:
     """Drop overlays of sessions untouched for a month — one small file per
     session would otherwise accumulate forever."""
@@ -889,6 +904,7 @@ def _reset_session_state(session_id: str, cwd: str, model_hint: str = ""):
     if _session_status_file(session_id).exists():
         return
     _prune_session_status()
+    cwd = _launch_cwd(cwd)
     pid = resolve_pid_for_cwd(cwd)
     status_file = STATUS_DIR / f"{pid}.json"
 
@@ -1274,6 +1290,116 @@ def _refresh_status_proj_segment(project: dict):
         pass
     if project.get("parent_pid"):
         _refresh_parent_status(project["parent_pid"])
+
+
+def _transcript_launch_cwd(path: Path) -> str:
+    """Launch dir of a session: the `cwd` on its first transcript row (later
+    rows follow the shell)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except Exception:
+                    continue
+                if cwd:
+                    return cwd
+    except OSError:
+        pass
+    return ""
+
+
+def _history_launch_cwds(path: Path) -> dict:
+    """session_id → launch dir from Claude Code's prompt history, whose rows
+    carry the session's `project`. Outlives transcripts (removed after 30 days
+    by default), so it can still place old sessions."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                sid, proj = row.get("sessionId"), row.get("project")
+                if sid and proj:
+                    out.setdefault(sid, proj)
+    except OSError:
+        pass
+    return out
+
+
+def dedup_sessions_mode(argv: list, transcripts_root: Path = None,
+                        history_path: Path = None):
+    """One-shot: a session recorded in more than one project (it `cd`'d into
+    another tracked project before v1.5.2 bound sessions to their launch
+    project) counts in each project's totals. Keep a single copy — the most
+    complete one, since each copy is cumulative up to its last Stop — in the
+    project the session was launched in; drop the others.
+
+    The launch dir comes from the transcript's first row, else from
+    ~/.claude/history.jsonl. Skipped (and listed) when neither knows it or the
+    launch project is not one of the holders — no safe way to pick a home then. Preview by
+    default; pass --yes to write."""
+    apply = "--yes" in argv
+    if not DATA_DIR.exists():
+        print("no project data")
+        return
+    root = transcripts_root or Path.home() / ".claude" / "projects"
+    sid_to_path = {p.stem: p for p in root.glob("*/*.jsonl")} if root.exists() else {}
+    history = _history_launch_cwds(history_path or Path.home() / ".claude" / "history.jsonl")
+
+    projects = {}
+    for f in DATA_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("pid"):
+            projects[data["pid"]] = data
+    holders = {}
+    for pid, data in projects.items():
+        for sid in data.get("sessions", {}):
+            holders.setdefault(sid, []).append(pid)
+
+    moves, skipped, touched = [], [], set()
+    for sid, pids in sorted(holders.items()):
+        if len(pids) < 2:
+            continue
+        names = ", ".join(projects[p].get("name", p) for p in pids)
+        launch = ((_transcript_launch_cwd(sid_to_path[sid]) if sid in sid_to_path else "")
+                  or history.get(sid, ""))
+        home = resolve_pid_for_cwd(launch) if launch else ""
+        if home not in pids:
+            skipped.append((sid, names, "launch dir unknown" if not launch
+                            else f"launch dir {launch} is not a holder"))
+            continue
+        copies = [projects[p]["sessions"][sid] for p in pids]
+        best = max(copies, key=lambda s: (s.get("turn_count", 0), s.get("cost", 0)))
+        dropped = sum(s.get("cost", 0) for s in copies) - best.get("cost", 0)
+        moves.append((sid, names, projects[home].get("name", home), dropped))
+        projects[home]["sessions"][sid] = best
+        for p in pids:
+            if p != home:
+                del projects[p]["sessions"][sid]
+        touched.update(pids)
+
+    if not moves and not skipped:
+        print("no session is recorded in more than one project — nothing to do")
+        return
+    for sid, names, home_name, dropped in moves:
+        print(f"{sid[:8]}  in [{names}] → keep in {home_name}  (−${dropped:.2f} double-count)")
+    for sid, names, why in skipped:
+        print(f"{sid[:8]}  in [{names}] → skipped: {why}")
+    print(f"\n{len(moves)} merged, −${sum(m[3] for m in moves):.2f} in total; "
+          f"{len(skipped)} skipped.")
+
+    if apply:
+        for pid in touched:
+            recompute_project_totals(projects[pid])
+            save_project_data(DATA_DIR, pid, projects[pid])
+            _refresh_status_proj_segment(projects[pid])
+    print("applied." if apply else "preview only — re-run with --yes to write.")
 
 
 def _scan_children(parent_pid: str) -> list:
@@ -1884,6 +2010,9 @@ def main():
     if "--reprice" in sys.argv:
         reprice_mode(sys.argv[sys.argv.index("--reprice") + 1:])
         return
+    if "--dedup-sessions" in sys.argv:
+        dedup_sessions_mode(sys.argv[sys.argv.index("--dedup-sessions") + 1:])
+        return
 
     if "--init" in sys.argv:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1921,7 +2050,7 @@ def main():
 
     session_id = hook.get("session_id", "unknown")
     transcript_path = hook.get("transcript_path", "")
-    cwd = hook.get("cwd", os.getcwd())
+    cwd = _launch_cwd(hook.get("cwd", os.getcwd()))
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1966,9 +2095,10 @@ def main():
     # window_size comes from the stored status written by render_mode with live Claude Code data.
     # The dict is a last-resort fallback only — runtime data is authoritative.
     current_model = last_model or model
-    pid = resolve_pid_for_cwd(cwd)
-    # If we rolled up to a tracked ancestor, the project's identity (name/cwd)
-    # belongs to that ancestor — don't overwrite it with the deeper subdir.
+    pid = _session_pid(session_id, cwd)
+    # If we rolled up to a tracked ancestor (or the session is bound to another
+    # project), that project's identity (name/cwd) wins — don't overwrite it
+    # with the directory this hook happened to fire in.
     if pid != project_id(cwd):
         try:
             anc = json.loads((DATA_DIR / f"{pid}.json").read_text(encoding="utf-8"))

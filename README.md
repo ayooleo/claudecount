@@ -228,6 +228,21 @@ folded in. Sessions whose transcript has been rotated away are left untouched
 unless they use a model that was provably mispriced, because re-deriving a cost
 from a flat token total would corrupt any session that mixed models. Idempotent.
 
+### `--dedup-sessions` — remove sessions counted in two projects
+
+Before 1.5.2, a session that `cd`'d into another tracked project (a worktree, a
+nested project) was recorded in both, and its cost counted in both totals. This
+keeps a single copy — the most complete one — in the project the session was
+launched in, which it reads from the transcript or, once that is gone, from
+Claude Code's `~/.claude/history.jsonl`:
+
+```bash
+python3 ~/.claude/hooks/token_tracker.py --dedup-sessions          # preview
+python3 ~/.claude/hooks/token_tracker.py --dedup-sessions --yes     # apply
+```
+
+Idempotent; a session whose launch directory can't be determined is listed and left alone.
+
 ## Data location
 
 ```
@@ -240,6 +255,14 @@ from a flat token total would corrupt any session that mixed models. Idempotent.
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.5.2] — 2026-09-30
+
+#### Fixed
+- **A session could be recorded in two projects, counting its cost twice.** Hooks receive the shell's current `cwd`, so a turn that ended after a `cd` into another tracked project (a worktree, a nested project) recorded the whole session there as well. A session is now bound to the project it was launched in (`CLAUDE_PROJECT_DIR`, kept in its `status/sessions/` overlay); per-project price overrides are read from that project too
+
+#### Added
+- **`--dedup-sessions`** — cleans up sessions already recorded in more than one project (see above). On this repo author's data it merged 10 sessions and removed $155.00 of double-counting
 
 ### [1.5.1] — 2026-09-30
 
