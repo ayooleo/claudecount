@@ -90,8 +90,18 @@ Write each test first and watch it fail, then change the code.
   always `null`): don't guess what it does to the bill. Add it to
   `_KNOWN_USAGE_KEYS` *and* to `_BILLED_AS_IS` with only the observed values,
   so `--audit` reports the first real one.
-- **Price change on an existing model**: update the entry and its test. Note the
-  old → new rate in the changelog.
+- **Price change on an existing model** (the page shows a different rate for an
+  id that already has an entry): stop and ask the user before editing. Do not
+  just change the entry and run `--reprice`. The price table has no effective
+  dates: `--reprice`, and every Stop hook, price a session's calls at today's
+  table, so calls made *before* the change would be rewritten at the new rate.
+  Those calls were billed correctly and must keep their cost. The fix is to add
+  dated prices first (pick the rate by each call's timestamp, with tests on both
+  sides of the date) and only then reprice. Record the old → new rate and the
+  date it took effect in the changelog.
+  This is not the same as a *new* model id that was billed as an older model
+  through a prefix match, or at the fallback rate. Those calls were never priced
+  correctly, so repricing all of them is right.
 - **New usage field or iteration type that affects billing**: handle it in
   `calc_cost` / `expand_iterations` / `_collect_assistant_usages`. Then add it
   to `_KNOWN_USAGE_KEYS` / `_KNOWN_ITERATION_TYPES` so `--audit` goes quiet.
@@ -119,7 +129,10 @@ Write each test first and watch it fail, then change the code.
    what the price change predicts before reporting it: the summary line should
    show nearly everything repriced "exactly from transcript", and a project
    that moves the opposite way to the price change (a rise after a price cut)
-   means a session is being rebuilt wrongly. Find out why first.
+   means a session is being rebuilt wrongly. Find out why first. The delta
+   should come only from calls served by the model ids this sync added or
+   corrected; calls on models whose entry did not change must reprice to the
+   same cost.
 
 ## Step 5 — Hand off
 
