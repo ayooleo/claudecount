@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Reuse model resolution / project-id logic from the tracker (deployed alongside)
 sys.path.insert(0, str(Path(__file__).parent))
-from token_tracker import fmt_model, project_id, _legacy_view, recompute_project_totals, _total_tokens  # noqa: E402
+from token_tracker import fmt_model, project_id, _legacy_view, recompute_project_totals, _total_tokens, scale_tokens  # noqa: E402
 
 
 def fmt_cost(c: float) -> str:
@@ -26,11 +26,8 @@ def fmt_cost(c: float) -> str:
 
 
 def fmt_tok(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}M"
-    if n >= 1000:
-        return f"{n/1000:.1f}k"
-    return str(n)
+    """Report form: fixed decimals (1 for k, 2 for M / B / T) so columns line up."""
+    return scale_tokens(n, {"k": 1, "M": 2, "B": 2, "T": 2}, strip=False)
 
 
 def load_all_projects(data_dir: Path) -> list:

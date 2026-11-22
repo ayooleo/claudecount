@@ -81,6 +81,15 @@ Write each test first and watch it fail, then change the code.
 - **Non-standard cache-read ratio** (anything but 0.1× input): add the key to
   `CACHE_READ_EXCEPTIONS` in the invariant test and say so in the MODELS comment.
 - **Fast mode**: add a `"fast": {...}` block and a `get_pricing(..., speed="fast")` test.
+- **Price that depends on prompt length** (Haiku 5.5: a higher rate once a
+  request's prompt passes 100,000 tokens): add a `"long": {"over": N, ...}`
+  block and `LongPromptTierTests`-style tests for both sides of the threshold.
+  The tier belongs to one request, so it is applied per API call; a stored
+  session total must go through `calc_cost(..., per_request=False)`.
+- **Usage field whose values you have never seen** (e.g. `fallback_credit`,
+  always `null`): don't guess what it does to the bill. Add it to
+  `_KNOWN_USAGE_KEYS` *and* to `_BILLED_AS_IS` with only the observed values,
+  so `--audit` reports the first real one.
 - **Price change on an existing model**: update the entry and its test. Note the
   old → new rate in the changelog.
 - **New usage field or iteration type that affects billing**: handle it in
@@ -102,8 +111,15 @@ Write each test first and watch it fail, then change the code.
 1. `python3 -m unittest discover -s tests`: all tests pass.
 2. `python3 src/token_tracker.py --audit --days 30`: `audit: 0 issue(s)`, or
    only issues the user agreed to leave, listed as known limitations.
-3. `python3 src/token_tracker.py --reprice`: preview only, **no `--yes`**.
-   Report the per-project and total delta to the user.
+3. `python3 src/token_tracker.py --dedup-sessions`: preview only. `--reprice`
+   skips a session recorded in two projects, so tell the user to apply this first
+   if it lists any.
+4. `python3 src/token_tracker.py --reprice`: preview only, **no `--yes`**.
+   Report the per-project and total delta to the user. Check the delta against
+   what the price change predicts before reporting it: the summary line should
+   show nearly everything repriced "exactly from transcript", and a project
+   that moves the opposite way to the price change (a rise after a price cut)
+   means a session is being rebuilt wrongly. Find out why first.
 
 ## Step 5 — Hand off
 
@@ -112,8 +128,16 @@ reprice delta, then push the branch (never `main`). Tell the user the next steps
 They are theirs to run or approve:
 
 ```
-# after merging to main, on each machine:
+# after merging to main: tag the release. Every release gets an annotated tag
+# in the form "vX.Y.Z — <summary>", the same summary as the commit subject.
+git tag -a vX.Y.Z -m "vX.Y.Z — <summary>"
+git push origin main vX.Y.Z
+
+# then, on each machine. install.sh downloads from GitHub's main, so it only
+# picks up the release once main is pushed; from a checkout, copy instead:
+#   cp src/token_tracker.py src/token_status.sh src/token_report.py ~/.claude/hooks/
 bash install.sh            # or: curl -fsSL https://raw.githubusercontent.com/ayooleo/ClaudeCount/main/install.sh | bash
+python3 ~/.claude/hooks/token_tracker.py --dedup-sessions   # preview; add --yes if it lists any
 python3 ~/.claude/hooks/token_tracker.py --reprice          # preview again with the deployed code
 python3 ~/.claude/hooks/token_tracker.py --reprice --yes    # apply — only with explicit approval
 ```

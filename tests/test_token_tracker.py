@@ -153,6 +153,53 @@ class ModelPricingTests(unittest.TestCase):
         f = t.get_pricing("claude-opus-5-5", speed="fast")
         self.assertEqual((f["input"], f["output"], f["cache_read"]), (8.0, 40.0, 0.40))
 
+    # --- Added 2026-11-21 (Claude Code 2.1.284 / 2.1.293 / 2.1.321, pricing page) ---
+
+    def test_fable52_priced_at_8_and_40_with_0025x_cache_read(self):
+        for key, name in (("claude-fable-5-2", "Fable 5.2"), ("claude-mythos-5-2", "Mythos 5.2")):
+            m = t._resolve_model(key)
+            self.assertEqual(m["name"], name)
+            self.assertEqual((m["input"], m["output"], m["context"]), (8.0, 40.0, 1_000_000))
+            self.assertEqual((m["cache_write_5m"], m["cache_write_1h"], m["cache_read"]),
+                             (10.0, 16.0, 0.20))
+
+    def test_fable52_wins_over_fable5_substring(self):
+        # Before this entry every Fable 5.2 call was billed as Fable 5: $10/$50
+        # and a $1.00 cache read (5x the real $0.20).
+        self.assertEqual(t._resolve_model("claude-fable-5-2[1m]")["name"], "Fable 5.2")
+        self.assertEqual(t._resolve_model("claude-fable-5-1")["name"], "Fable 5.1")
+        self.assertEqual(t._resolve_model("claude-fable-5")["name"], "Fable 5")
+        self.assertEqual(t._resolve_model("claude-mythos-5-2")["name"], "Mythos 5.2")
+
+    def test_fable52_fast_tier(self):
+        for key in ("claude-fable-5-2", "claude-mythos-5-2"):
+            f = t.get_pricing(key, speed="fast")
+            self.assertEqual((f["input"], f["output"]), (16.0, 80.0))
+            self.assertEqual((f["cache_write_5m"], f["cache_write_1h"], f["cache_read"]),
+                             (20.0, 32.0, 0.40))
+
+    def test_sonnet55_priced_at_2_and_10_with_005x_cache_read(self):
+        m = t._resolve_model("claude-sonnet-5-5")
+        self.assertEqual(m["name"], "Sonnet 5.5")
+        self.assertEqual((m["input"], m["output"], m["context"]), (2.0, 10.0, 1_000_000))
+        self.assertEqual((m["cache_write_5m"], m["cache_write_1h"], m["cache_read"]),
+                         (2.5, 4.0, 0.10))
+
+    def test_sonnet55_wins_over_sonnet5_substring(self):
+        # Billed as Sonnet 5 before: same input/output, but cache reads at $0.20
+        # instead of $0.10.
+        self.assertEqual(t._resolve_model("claude-sonnet-5-5[1m]")["name"], "Sonnet 5.5")
+        self.assertEqual(t._resolve_model("claude-sonnet-5")["name"], "Sonnet 5")
+
+    def test_haiku55_base_tier(self):
+        m = t._resolve_model("claude-haiku-5-5")
+        self.assertIsNot(m, t._DEFAULT_MODEL)
+        self.assertEqual(m["name"], "Haiku 5.5")
+        self.assertEqual((m["input"], m["output"], m["context"]), (0.10, 0.50, 1_000_000))
+        self.assertEqual((m["cache_write_5m"], m["cache_write_1h"], m["cache_read"]),
+                         (0.125, 0.20, 0.01))
+        self.assertEqual(t._resolve_model("claude-haiku-4-5")["name"], "Haiku 4.5")
+
     # Haiku 3 is retired; Anthropic published rounded cache rates for it
     # ($0.30 write / $0.03 read on a $0.25 input) rather than exact multiples.
     # Kept verbatim so old transcripts reprice to what was actually billed.
@@ -160,8 +207,23 @@ class ModelPricingTests(unittest.TestCase):
 
     # Published cache-read multipliers that are NOT the usual 0.1x input.
     CACHE_READ_EXCEPTIONS = {
-        "claude-fable-5-1": 0.025, "claude-mythos-5-1": 0.025, "claude-opus-5-5": 0.05,
+        "claude-fable-5-2": 0.025, "claude-mythos-5-2": 0.025,
+        "claude-fable-5-1": 0.025, "claude-mythos-5-1": 0.025,
+        "claude-opus-5-5": 0.05, "claude-sonnet-5-5": 0.05,
     }
+
+    def test_nested_tiers_keep_their_models_multipliers(self):
+        # A `fast` / `long` block is a full price block; its cache rates must be
+        # the same multiples of *its own* input as the base block's.
+        for key, m in t.MODELS.items():
+            read_x = self.CACHE_READ_EXCEPTIONS.get(key, 0.1)
+            for tier in ("fast", "long"):
+                b = m.get(tier)
+                if not b:
+                    continue
+                self.assertAlmostEqual(b["cache_write_5m"], b["input"] * 1.25, places=4, msg=f"{key}.{tier}")
+                self.assertAlmostEqual(b["cache_write_1h"], b["input"] * 2.0, places=4, msg=f"{key}.{tier}")
+                self.assertAlmostEqual(b["cache_read"], b["input"] * read_x, places=4, msg=f"{key}.{tier}")
 
     def test_cache_read_is_tenth_of_input_except_listed(self):
         for key, m in t.MODELS.items():
@@ -220,6 +282,125 @@ class FastModeTests(unittest.TestCase):
         u = {**self.STD, "speed": "fast"}
         cost = t.calc_cost(u, "claude-opus-5", {"input": 1.0, "output": 1.0})
         self.assertAlmostEqual(cost, 2.0, places=4)
+
+
+class LongPromptTierTests(unittest.TestCase):
+    """Haiku 5.5 is priced by prompt length: a request whose prompt is over
+    100,000 tokens pays the higher tier on every token of that request. Prompt
+    length = all input tokens, cache reads and writes included; output excluded."""
+
+    H = "claude-haiku-5-5"
+
+    @staticmethod
+    def _u(inp=0, out=0, cr=0, cc=0):
+        return {"input_tokens": inp, "output_tokens": out,
+                "cache_read_input_tokens": cr, "cache_creation_input_tokens": cc}
+
+    def test_prompt_at_threshold_stays_on_base_tier(self):
+        # "over 100,000" — exactly 100,000 is still the base tier.
+        cost = t.calc_cost(self._u(inp=100_000, out=1_000_000), self.H)
+        self.assertAlmostEqual(cost, 0.01 + 0.50, places=6)
+
+    def test_prompt_over_threshold_pays_long_tier_on_everything(self):
+        cost = t.calc_cost(self._u(inp=100_001, out=1_000_000), self.H)
+        self.assertAlmostEqual(cost, 100_001 / 1e6 * 0.50 + 2.50, places=6)
+
+    def test_cache_reads_and_writes_count_toward_prompt_length(self):
+        # 10 fresh + 60k read + 60k written = 120,010 prompt tokens -> long tier,
+        # "even if part of the prompt is a cache hit".
+        cost = t.calc_cost(self._u(inp=10, cr=60_000, cc=60_000), self.H)
+        expected = 10 / 1e6 * 0.50 + 60_000 / 1e6 * 0.05 + 60_000 / 1e6 * 0.625
+        self.assertAlmostEqual(cost, expected, places=8)
+
+    def test_output_does_not_count_toward_prompt_length(self):
+        cost = t.calc_cost(self._u(inp=50_000, out=900_000), self.H)
+        self.assertAlmostEqual(cost, 50_000 / 1e6 * 0.10 + 900_000 / 1e6 * 0.50, places=8)
+
+    def test_tier_is_per_request_not_per_session(self):
+        # Two 60k requests are two base-tier requests, not one 120k long one.
+        pairs = [(self._u(inp=60_000), self.H), (self._u(inp=60_001), self.H)]
+        _, cost, _ = t.sum_usages(pairs)
+        self.assertAlmostEqual(cost, 120_001 / 1e6 * 0.10, places=8)
+
+    def test_other_models_have_no_long_tier(self):
+        cost = t.calc_cost(self._u(inp=900_000), "claude-opus-5-5")
+        self.assertAlmostEqual(cost, 0.9 * 4.0, places=6)
+
+    def test_get_pricing_selects_tier_from_prompt_tokens(self):
+        self.assertEqual(t.get_pricing(self.H)["input"], 0.10)
+        self.assertEqual(t.get_pricing(self.H, prompt_tokens=100_000)["input"], 0.10)
+        long = t.get_pricing(self.H, prompt_tokens=100_001)
+        self.assertEqual((long["input"], long["output"], long["cache_write_5m"],
+                          long["cache_write_1h"], long["cache_read"]),
+                         (0.50, 2.50, 0.625, 1.00, 0.05))
+
+    def test_flat_session_total_is_not_tiered(self):
+        # A stored session total is a sum over many requests; its size says
+        # nothing about any single prompt, so it must not trip the long tier.
+        tokens = self._u(inp=1_000_000, out=1_000_000)
+        self.assertAlmostEqual(t.calc_cost(tokens, self.H, per_request=False), 0.60, places=6)
+
+    def test_no_transcript_reprice_of_haiku55_uses_base_tier(self):
+        # Recorded at the $3/$15 default ($18 here) — known-wrong, so repriced.
+        sess = {"cost": 18.0, "model": self.H,
+                "tokens": self._u(inp=1_000_000, out=1_000_000)}
+        _, cost, _, how = t._reprice_session(sess, None, None)
+        self.assertEqual(how, "approx")
+        self.assertAlmostEqual(cost, 0.60, places=6)
+
+
+class DataResidencyTests(unittest.TestCase):
+    """`usage.inference_geo`: "global" (the default) is list price; US-only
+    inference bills 1.1x on input, output, cache writes and cache reads."""
+
+    U = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+         "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 1_000_000}
+    BASE = 4.0 + 20.0 + 0.20 + 5.0   # Opus 5.5
+
+    def test_global_and_not_available_are_list_price(self):
+        for geo in ("global", "not_available", None):
+            u = {**self.U, "inference_geo": geo}
+            self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5-5"), self.BASE, places=6, msg=geo)
+
+    def test_us_only_inference_bills_110_percent(self):
+        u = {**self.U, "inference_geo": "us"}
+        self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5-5"), self.BASE * 1.1, places=6)
+
+    def test_us_multiplier_stacks_on_fast_mode(self):
+        u = {**self.U, "inference_geo": "us", "speed": "fast"}
+        self.assertAlmostEqual(t.calc_cost(u, "claude-opus-5-5"),
+                               (8.0 + 40.0 + 0.40 + 10.0) * 1.1, places=6)
+
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+class TokenFormatTests(unittest.TestCase):
+    """Token counts scale through k / M / B / T. Projects pass a billion tokens
+    in practice (30.6B observed), which the old k/M-only formatter rendered as
+    `30615.6M`."""
+
+    def _bar(self, n):
+        return _ANSI.sub("", t._fmt_tok(n))
+
+    def test_status_bar_units(self):
+        for n, want in ((0, "0"), (999, "999"), (1_000, "1k"), (1_500, "1.5k"),
+                        (179_000, "179k"), (1_000_000, "1M"), (18_400_000, "18.4M"),
+                        (1_000_000_000, "1B"), (30_615_572_425, "30.62B"),
+                        (2_500_000_000_000, "2.5T"), (1_234_000_000_000_000, "1234T")):
+            self.assertEqual(self._bar(n), want, msg=str(n))
+
+    def test_rounding_carries_into_the_next_unit(self):
+        # 999,990 used to render as "1000k".
+        for n, want in ((999_990, "1M"), (999_990_000, "1B"), (999_999_999_999, "1T")):
+            self.assertEqual(self._bar(n), want, msg=str(n))
+
+    def test_report_units(self):
+        import token_report as r
+        for n, want in ((999, "999"), (1_234, "1.2k"), (1_234_567, "1.23M"),
+                        (30_615_572_425, "30.62B"), (1_500_000_000_000, "1.50T"),
+                        (999_999, "1.00M"), (999_999_999, "1.00B")):
+            self.assertEqual(r.fmt_tok(n), want, msg=str(n))
 
 
 class CacheTierTests(unittest.TestCase):
@@ -641,6 +822,29 @@ class DedupSessionsTests(unittest.TestCase):
         self.assertIn("preview", out)
         self.assertIn("S", self._load(inner)["sessions"])
 
+    def test_reprice_skips_a_session_recorded_in_two_projects(self):
+        # Rebuilding both copies from the one transcript would turn a stale
+        # partial copy into a second full one (seen: a $0.56 fragment → $151).
+        outer = self._project("/w/outer", "outer", {"S": self._sess(2.0, 3)})
+        inner = self._project("/w/outer/inner", "inner", {"S": self._sess(3.5, 5)})
+        solo = self._project("/w/solo", "solo", {"T": self._sess(9.0, 1)})
+        for sid in ("S", "T"):
+            (self.transcripts / "enc" / f"{sid}.jsonl").write_text(json.dumps(
+                {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {
+                    "input_tokens": 1_000_000, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}) + "\n")
+        old = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t.reprice_mode(["--yes"], transcripts_root=self.transcripts)
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old
+        self.assertAlmostEqual(self._load(outer)["sessions"]["S"]["cost"], 2.0)
+        self.assertAlmostEqual(self._load(inner)["sessions"]["S"]["cost"], 3.5)
+        self.assertAlmostEqual(self._load(solo)["sessions"]["T"]["cost"], 4.0)   # 1M @ $4
+        self.assertIn("--dedup-sessions", out)
+
     def test_history_names_launch_project_when_transcript_is_gone(self):
         # Transcripts are cleaned up after 30 days; history.jsonl keeps each
         # prompt's `project` (the launch dir) much longer.
@@ -781,9 +985,30 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(self._acc([_block("r1", 10, model="claude-opus-5-5[1m]"),
                                     _block("r2", 10, model="<synthetic>")]), [])
 
+    def test_current_claude_code_usage_shape_is_clean(self):
+        # Claude Code 2.1.306+: inference_geo is "global" (list price) and every
+        # row carries `fallback_credit: null`.
+        msg = _block("r1", 10, model="claude-fable-5-2")
+        msg["message"]["usage"].update({"speed": "standard", "service_tier": "standard",
+                                        "inference_geo": "global", "fallback_credit": None})
+        self.assertEqual(self._acc([msg]), [])
+
+    def test_us_inference_geo_is_handled_not_flagged(self):
+        msg = _block("r1", 10, model="claude-opus-5-5")
+        msg["message"]["usage"]["inference_geo"] = "us"
+        self.assertEqual(self._acc([msg]), [])
+
+    def test_non_null_fallback_credit_is_flagged(self):
+        # Only ever seen as null, so its billing meaning is unknown. A real value
+        # must surface instead of being silently ignored.
+        msg = _block("r1", 10, model="claude-opus-5-5")
+        msg["message"]["usage"]["fallback_credit"] = {"amount": 1}
+        issues = self._acc([msg])
+        self.assertTrue(any("fallback_credit" in i for i in issues), issues)
+
     def test_new_usage_key_and_modifier_values_are_flagged(self):
         msg = _block("r1", 10)
-        msg["message"]["usage"].update({"brand_new_tokens": 5, "inference_geo": "us",
+        msg["message"]["usage"].update({"brand_new_tokens": 5, "inference_geo": "eu",
                                         "iterations": [{"type": "compaction"}, {"type": "message"}]})
         issues = " ".join(self._acc([msg]))
         for needle in ("brand_new_tokens", "inference_geo", "compaction"):
@@ -817,12 +1042,32 @@ class RepriceSessionTests(unittest.TestCase):
         self.assertEqual(how, "approx")
         self.assertAlmostEqual(cost, 30.0, places=4)
 
+    def test_no_transcript_session_recorded_after_pricing_is_left_alone(self):
+        # Regression (found 2026-11-21, +$374.67 of damage in a preview): a Fable 5.1
+        # session recorded *after* Fable 5.1 was priced holds an exact per-call
+        # sum — here Fable 5.1 plus cheaper subagents, so not 1M/1M at any one
+        # rate. Once its transcript ages out it must not be flat-repriced just
+        # because its model name is in _NEWLY_PRICED.
+        sess = {"cost": 41.7, "tokens": self.TOKENS, "model": "claude-fable-5-1"}
+        _, cost, _, how = t._reprice_session(sess, None, None)
+        self.assertEqual(how, "skip")
+        self.assertEqual(cost, 41.7)
+
+    def test_no_transcript_reprice_is_idempotent(self):
+        sess = {"cost": 18.0, "tokens": self.TOKENS, "model": "claude-opus-5"}
+        tokens, cost, model, how = t._reprice_session(sess, None, None)
+        sess.update(cost=cost, tokens=tokens, model=model)
+        _, again, _, how2 = t._reprice_session(sess, None, None)
+        self.assertEqual((how, how2), ("approx", "skip"))
+        self.assertEqual(again, cost)
+
     def test_no_transcript_reprice_bills_stored_1h_breakdown_at_2x(self):
         tokens = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
                   "cache_creation_input_tokens": 1_000_000,
                   "cache_creation": {"ephemeral_5m_input_tokens": 0,
                                      "ephemeral_1h_input_tokens": 1_000_000}}
-        sess = {"cost": 3.75, "tokens": tokens, "model": "claude-opus-5"}
+        # $6.00 = 1M 1h-cache-write tokens at the default rate it was recorded at.
+        sess = {"cost": 6.00, "tokens": tokens, "model": "claude-opus-5"}
         _, cost, _, how = t._reprice_session(sess, None, None)
         self.assertEqual(how, "approx")
         self.assertAlmostEqual(cost, 10.0, places=4)

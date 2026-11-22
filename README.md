@@ -28,7 +28,9 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |--------|---------|
 | `↑` | Total input tokens (non-cached + cache_creation + cache_read) |
 | `↓` | Output tokens generated |
-| `«` | Portion of `↑` served from cache (0.1× input rate; 0.05× on Opus 5.5; 0.025× on Fable/Mythos 5.1) |
+| `«` | Portion of `↑` served from cache (0.1× input rate; 0.05× on Opus 5.5 / Sonnet 5.5; 0.025× on Fable/Mythos 5.2 and 5.1) |
+
+Token counts are abbreviated with `k` / `M` / `B` / `T` — thousand, million, billion, trillion (`179k`, `18.4M`, `30.62B`, `1.2T`). `B` and `T` keep two decimals so a large project total still visibly moves.
 
 ## Install
 
@@ -176,25 +178,33 @@ Cache write has two tiers: **5-minute** (1.25× input) and **1-hour** (2× input
 
 | Model | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |-------|-------|--------|----------------|----------------|------------|
+| Fable 5.2 / Mythos 5.2 | $8.00 | $40.00 | $10.00 | $16.00 | $0.20 † |
 | Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
 | Opus 5.5 | $4.00 | $20.00 | $5.00 | $8.00 | $0.20 † |
 | Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
+| Sonnet 5.5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.10 † |
 | Sonnet 5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.20 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
+| Haiku 5.5 — prompt ≤ 100K ‡ | $0.10 | $0.50 | $0.125 | $0.20 | $0.01 |
+| Haiku 5.5 — prompt > 100K ‡ | $0.50 | $2.50 | $0.625 | $1.00 | $0.05 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
 | Sonnet 3.7 / 3.5 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 3.5 | $0.80 | $4.00 | $1.00 | $1.60 | $0.08 |
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-Prices are per million tokens. **Fable 5.1 / 5**, **Mythos 5.1 / 5**, **Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**, **Sonnet 5**, and **Sonnet 4.6** support a 1M-token context window at standard rates; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-09-22. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
+Prices are per million tokens. **Fable 5.2 / 5.1 / 5**, **Mythos 5.2 / 5.1 / 5**, **Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**, **Sonnet 5.5 / 5 / 4.6**, and **Haiku 5.5** support a 1M-token context window; all other models default to 200K. Rates verified against the [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) catalog on 2026-11-21. For authoritative billing check the [Claude Console usage page](https://platform.claude.com/usage).
 
-† Cache reads are billed below the usual 0.1× input on three models: **Opus 5.5** at 0.05× ($0.20), **Fable 5.1 / Mythos 5.1** at 0.025× ($0.25). Every other model uses 0.1×.
+† Cache reads are billed below the usual 0.1× input on these models: **Opus 5.5** ($0.20) and **Sonnet 5.5** ($0.10) at 0.05×; **Fable 5.2 / Mythos 5.2** ($0.20) and **Fable 5.1 / Mythos 5.1** ($0.25) at 0.025×. Every other model uses 0.1×.
 
-**Fast mode** (research preview) bills **Opus 5.5** at $8 / $40 and **Opus 5 / Opus 4.8** at $10 / $50 per Mtok. ClaudeCount detects it from `usage.speed == "fast"` in the transcript and applies the premium tier automatically; cache multipliers stack on top of the fast base.
+‡ **Haiku 5.5 is priced by prompt length.** A request whose prompt is over 100,000 tokens — all input tokens, cache reads and cache writes included, output excluded — pays the higher row on *every* token of that request. ClaudeCount decides this per API call from the transcript. A session whose transcript is gone only has a flat total, which cannot show how long each prompt was, so `--reprice` prices such a total at the lower row (a floor).
+
+**Fast mode** bills **Fable 5.2 / Mythos 5.2** at $16 / $80, **Opus 5.5** at $8 / $40 and **Opus 5 / Opus 4.8** at $10 / $50 per Mtok (Opus 4.8 fast mode is deprecated and is removed on 2026-11-30). ClaudeCount detects it from `usage.speed == "fast"` in the transcript and applies the premium tier automatically; cache multipliers stack on top of the fast base.
+
+**Data residency.** Claude Code transcripts report `usage.inference_geo: "global"`, the default, billed at list price. US-only inference (`"us"`) costs 1.1× on input, output, cache writes and cache reads; ClaudeCount applies that multiplier if a transcript ever carries it.
 
 **Server-side model fallback.** When a request falls back to another model mid-flight (Claude Code 2.1.27x records e.g. `claude-fable-5` → `claude-opus-4-8` in `usage.iterations`), both attempts are billed, each at its own model's rates. The top-level `usage` only covers the last attempt, so ClaudeCount prices every iteration separately.
 
@@ -225,8 +235,13 @@ python3 ~/.claude/hooks/token_tracker.py --reprice --yes     # apply
 Sessions whose Claude Code transcript is still on disk are repriced exactly —
 every API call against the model that actually served it, with subagent spend
 folded in. Sessions whose transcript has been rotated away are left untouched
-unless they use a model that was provably mispriced, because re-deriving a cost
-from a flat token total would corrupt any session that mixed models. Idempotent.
+unless their stored cost is provably a fallback figure — it equals their token
+total at the $3/$15 rate — because re-deriving a cost from a flat token total
+would corrupt any session that mixed models. Idempotent.
+
+A session recorded in more than one project is skipped, since rebuilding every
+copy from the one transcript would count it twice. Run `--dedup-sessions`
+first; `--reprice` says so when it skips any.
 
 ### `--dedup-sessions` — remove sessions counted in two projects
 
@@ -255,6 +270,25 @@ Idempotent; a session whose launch directory can't be determined is listed and l
 ## Changelog
 
 This project follows [Semantic Versioning 2.0](https://semver.org/) and the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+### [1.6.0] — 2026-11-21
+
+#### Added
+- **Claude Fable 5.2** (`claude-fable-5-2`, Claude Code 2.1.321's default Fable) and **Claude Mythos 5.2** (`claude-mythos-5-2`): $8 / $40 per Mtok, 1M context. Cache write 5m $10.00 / 1h $16.00, cache read **$0.20 (0.025× input)**. Fast mode $16 / $80
+- **Claude Sonnet 5.5** (`claude-sonnet-5-5`, Claude Code 2.1.284's default Sonnet): $2 / $10 per Mtok, 1M context, cache read **$0.10 (0.05× input)**
+- **Claude Haiku 5.5** (`claude-haiku-5-5`, Claude Code 2.1.293's default Haiku), the first model priced by prompt length: $0.10 / $0.50 per Mtok for a prompt up to 100,000 tokens, $0.50 / $2.50 above it. The tier is chosen per API call
+- **Billion and trillion token units.** Token counts on the status bar and in reports now scale through `k` / `M` / `B` / `T`; a 30.6-billion-token project reads `30.62B`, not `30615.6M`
+- **US data-residency multiplier**: `usage.inference_geo == "us"` bills 1.1×. Claude Code now reports `"global"` (list price) where it used to report `"not_available"`
+
+#### Fixed
+- **Fable 5.2 was billed and displayed as Fable 5** through the `claude-fable-5` prefix match: 25% too high on input/output and 5× on cache reads ($1.00 instead of $0.20). **Sonnet 5.5 was billed as Sonnet 5**, doubling its cache-read cost. **Haiku 5.5 had no entry at all** and was billed at the $3 / $15 fallback, 30× its real input price. A transcript-based `--reprice` preview of the author's history moves the tracked total −$1,012
+- **`--reprice` could damage sessions that were already correct.** Once a transcript was cleaned up, any session whose model had *ever* been added late was re-derived from its flat token total at a single rate — including sessions recorded long after the model was priced, which hold an exact per-call sum across several models. A preview showed +$375 of such damage. The no-transcript path now runs only when the stored cost equals the token total at the $3 / $15 fallback rate, i.e. when it is provably a fallback figure
+- **`--reprice` rebuilt every copy of a session recorded in two projects**, turning a stale partial copy into a second full one. Such sessions are now skipped with a pointer to `--dedup-sessions`
+- A token count that rounded up to 1000 of a unit was shown as `1000k` instead of `1M`
+
+#### Changed
+- `--audit` accepts `usage.inference_geo` `"global"` / `"us"` and the new `usage.fallback_credit` field. `fallback_credit` has only ever been seen as `null`, so its effect on a bill is unknown; `--audit` reports it again if it ever carries a value
+- All rates re-checked against [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) on 2026-11-21. Confirmed unchanged: Fable 5.1 / 5, Mythos 5.1 / 5, Opus 5.5 / 5 / 4.8 / 4.7 / 4.6 / 4.5, Sonnet 5 / 4.6 / 4.5, Haiku 4.5
 
 ### [1.5.2] — 2026-09-30
 

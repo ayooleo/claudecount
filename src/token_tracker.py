@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 
 BASE_DIR   = Path.home() / ".claude" / "token_usage"
 STATUS_DIR = BASE_DIR / "status"
@@ -37,18 +37,31 @@ def _is_assistant(msg: dict) -> bool:
     return ((msg.get("role") or msg.get("type")) == "assistant"
             or msg.get("message", {}).get("role") == "assistant")
 
-# Per-million-token rates and per-model metadata. Verified 2026-04-29 against
+# Per-million-token rates and per-model metadata. Last verified 2026-11-21 against
 # https://platform.claude.com/docs/en/about-claude/models/overview and
 # https://platform.claude.com/docs/en/about-claude/pricing.
 #   cache_write_5m = ephemeral 5-min tier (1.25× input)
 #   cache_write_1h = ephemeral 1-hr tier   (2×    input)
-#   cache_read     =                       (0.1×  input)
-# 1M context: Opus 4.8 / 4.7 / 4.6, Sonnet 4.6. All other models 200K.
+#   cache_read     = 0.1× input, except 0.05× on Opus 5.5 / Sonnet 5.5 and
+#                    0.025× on Fable / Mythos 5.2 and 5.1
+# Optional nested price blocks, each a full replacement for the base block:
+#   "fast" — usage.speed == "fast"
+#   "long" — the request's prompt is over `long["over"]` tokens (Haiku 5.5)
+# 1M context: every Claude 5 model and Opus / Sonnet 4.6+. Haiku 4.5, Opus /
+# Sonnet 4.5 and older: 200K.
 MODELS = {
-    # Claude 5 family (Fable / Mythos) — most capable; 1M context. Verified 2026-09-12
+    # Fable 5.2 / Mythos 5.2 — default Fable from Claude Code 2.1.321. Verified 2026-11-21:
+    # $8 / $40, cache reads at 0.025x input ($0.20). Fast mode $16 / $80; its cache rates
+    # are derived (the page says multipliers stack on the fast base). The pricing page
+    # lists Mythos 5.2 by name only — its id here follows the claude-mythos-5-1 pattern.
+    "claude-fable-5-2":  {"input":  8.00, "output": 40.00, "cache_write_5m": 10.00, "cache_write_1h": 16.00, "cache_read": 0.20, "context": 1_000_000, "name": "Fable 5.2",
+                          "fast": {"input": 16.00, "output": 80.00, "cache_write_5m": 20.00, "cache_write_1h": 32.00, "cache_read": 0.40}},
+    "claude-mythos-5-2": {"input":  8.00, "output": 40.00, "cache_write_5m": 10.00, "cache_write_1h": 16.00, "cache_read": 0.20, "context": 1_000_000, "name": "Mythos 5.2",
+                          "fast": {"input": 16.00, "output": 80.00, "cache_write_5m": 20.00, "cache_write_1h": 32.00, "cache_read": 0.40}},
+    # Claude 5 family (Fable / Mythos) — 1M context. Verified 2026-09-12
     # against the platform.claude.com pricing page ($10 / $50 per MTok).
     # NOTE: Fable 5.1 / Mythos 5.1 price cache reads at 0.025x input ($0.25), NOT the
-    # usual 0.1x. Every other model uses 0.1x. Don't "fix" this to 1.00.
+    # usual 0.1x. Fable 5 / Mythos 5 use the plain 0.1x. Don't "fix" this to 1.00.
     "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25, "context": 1_000_000, "name": "Fable 5.1"},
     "claude-mythos-5-1": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25, "context": 1_000_000, "name": "Mythos 5.1"},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00, "context": 1_000_000, "name": "Fable 5"},
@@ -62,7 +75,17 @@ MODELS = {
     # mode premium tier (usage.speed == "fast"), Opus 5 / Opus 4.8 only.
     "claude-opus-5":     {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 5",
                           "fast": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00}},
+    # Sonnet 5.5 — default Sonnet from Claude Code 2.1.284. Verified 2026-11-21. Same
+    # $2 / $10 as Sonnet 5 but cache reads at 0.05x input ($0.10), NOT 0.1x.
+    "claude-sonnet-5-5": {"input":  2.00, "output": 10.00, "cache_write_5m":  2.50, "cache_write_1h":  4.00, "cache_read": 0.10, "context": 1_000_000, "name": "Sonnet 5.5"},
     "claude-sonnet-5":   {"input":  2.00, "output": 10.00, "cache_write_5m":  2.50, "cache_write_1h":  4.00, "cache_read": 0.20, "context": 1_000_000, "name": "Sonnet 5"},
+    # Haiku 5.5 — default Haiku from Claude Code 2.1.293. Verified 2026-11-21. The only
+    # model priced by prompt length: a request whose prompt (input + cache read + cache
+    # write tokens) is over 100,000 tokens bills *every* token of that request at the
+    # `long` block (5x). Per request, so it is applied in calc_cost, never to a total.
+    "claude-haiku-5-5":  {"input":  0.10, "output":  0.50, "cache_write_5m": 0.125, "cache_write_1h":  0.20, "cache_read": 0.01, "context": 1_000_000, "name": "Haiku 5.5",
+                          "long": {"over": 100_000,
+                                   "input":  0.50, "output":  2.50, "cache_write_5m": 0.625, "cache_write_1h":  1.00, "cache_read": 0.05}},
     # Claude 4 family
     "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "context": 1_000_000, "name": "Opus 4.8",
                           "fast": {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00}},
@@ -119,12 +142,17 @@ def fmt_model(model: str) -> str:
 _PRICE_KEYS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
 
 
-def get_pricing(model: str, overrides: dict = None, speed: str = None) -> dict:
+def get_pricing(model: str, overrides: dict = None, speed: str = None,
+                prompt_tokens: int = 0) -> dict:
     m = _resolve_model(model)
-    # Fast mode (research preview, Opus 5.5 / Opus 5 / Opus 4.8) bills at a premium tier.
+    # Fast mode (Fable / Mythos 5.2, Opus 5.5 / 5 / 4.8) bills at a premium tier.
     # Cache multipliers stack on top of the fast base, so the whole block is swapped.
     if speed == "fast" and "fast" in m:
         m = m["fast"]
+    # Prompt-length pricing (Haiku 5.5): a request over the threshold pays the
+    # `long` block on all of its tokens. No model has both a fast and a long block.
+    elif "long" in m and prompt_tokens > m["long"]["over"]:
+        m = m["long"]
     base = {k: m[k] for k in _PRICE_KEYS}
     if not overrides:
         return base
@@ -141,8 +169,24 @@ def get_context_window(model: str) -> int:
     return _resolve_model(model)["context"]
 
 
-def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
-    p = get_pricing(model, price_override, usage.get("speed"))
+# US-only inference (usage.inference_geo == "us") bills 1.1x on input, output,
+# cache writes and cache reads, on top of any fast / long tier. "global" (what
+# Claude Code sends) and "not_available" are list price. Derived: the pricing
+# page gives the multiplier, not a per-model table.
+_GEO_MULTIPLIER = {"us": 1.1}
+
+
+def calc_cost(usage: dict, model: str, price_override: dict = None,
+              per_request: bool = True) -> float:
+    """Cost of one API call's `usage` at `model`'s rates.
+
+    `per_request=False` is for a stored session total (the no-transcript reprice):
+    it is a sum over many requests, so its size must not select a prompt-length
+    tier — the base tier is used, which under-prices any long requests in it."""
+    prompt_tokens = (usage.get("input_tokens", 0)
+                     + usage.get("cache_read_input_tokens", 0)
+                     + usage.get("cache_creation_input_tokens", 0)) if per_request else 0
+    p = get_pricing(model, price_override, usage.get("speed"), prompt_tokens)
     # Two-tier cache write: prefer detailed breakdown when available
     cc = usage.get("cache_creation") or {}
     tokens_5m = cc.get("ephemeral_5m_input_tokens", 0)
@@ -156,7 +200,12 @@ def calc_cost(usage: dict, model: str, price_override: dict = None) -> float:
         + tokens_5m                             / 1e6 * p["cache_write_5m"]
         + tokens_1h                             / 1e6 * p["cache_write_1h"]
         + usage.get("cache_read_input_tokens", 0) / 1e6 * p["cache_read"]
-    )
+    ) * _geo_multiplier(usage)
+
+
+def _geo_multiplier(usage: dict) -> float:
+    geo = usage.get("inference_geo")
+    return _GEO_MULTIPLIER.get(geo, 1.0) if isinstance(geo, str) else 1.0
 
 
 def project_id(cwd: str) -> str:
@@ -297,8 +346,9 @@ def expand_iterations(usage: dict, model: str) -> list:
     fallback (seen 2.1.27x: iterations = [message @ claude-fable-5,
     fallback_message @ claude-opus-4-8]) the first attempt is billed too, at its
     own model's rates, and would otherwise vanish. Iterations without a `model`
-    inherit the message's; `speed` is a request-level field and is carried over.
-    A single iteration equals the top-level usage, so it's returned unchanged."""
+    inherit the message's; `speed` and `inference_geo` are request-level fields
+    and are carried over. A single iteration equals the top-level usage, so it's
+    returned unchanged."""
     iters = usage.get("iterations")
     if not isinstance(iters, list) or len(iters) < 2:
         return [(usage, model)]
@@ -307,8 +357,9 @@ def expand_iterations(usage: dict, model: str) -> list:
         if not isinstance(it, dict):
             continue
         u = {k: v for k, v in it.items() if k not in ("type", "model")}
-        if "speed" in usage:
-            u["speed"] = usage["speed"]
+        for key in ("speed", "inference_geo"):
+            if key in usage:
+                u[key] = usage[key]
         out.append((u, it.get("model") or model))
     return out or [(usage, model)]
 
@@ -604,14 +655,35 @@ def _fmt_cost(c) -> str:
     return f"{_YLW}${c:.2f}{_R}"
 
 
+# Token-count units, largest first: (size, suffix, status-bar decimals). B and T
+# keep two decimals — at that scale one decimal is a 100M-token step, too coarse
+# to see a project total move between turns.
+_TOK_UNITS = ((10**12, "T", 2), (10**9, "B", 2), (10**6, "M", 1), (10**3, "k", 1))
+
+
+def scale_tokens(n, decimals: dict = None, strip: bool = True) -> str:
+    """Plain token count with a k / M / B / T suffix, e.g. 30_615_572_425 → '30.62B'.
+
+    `decimals` maps a suffix to its decimal places (default: the status-bar
+    values in _TOK_UNITS); `strip` drops trailing zeros ('1.50' → '1.5', '1.0' → '1').
+    A value that rounds up to 1000 of a unit carries into the next one, so
+    999_990 is '1M', not '1000k'. Beyond T the number just grows ('1234T')."""
+    i = next((i for i, (size, _, _) in enumerate(_TOK_UNITS) if n >= size), None)
+    if i is None:
+        return str(n)
+    while True:
+        size, unit, dec = _TOK_UNITS[i]
+        s = f"{n / size:.{(decimals or {}).get(unit, dec)}f}"
+        if i == 0 or float(s) < 1000:
+            break
+        i -= 1
+    if strip and "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s + unit
+
+
 def _fmt_tok(n) -> str:
-    if n >= 1_000_000:
-        s = f"{n/1_000_000:.1f}".rstrip("0").rstrip(".")
-        return f"{_GRY}{s}M{_R}"
-    if n >= 1_000:
-        s = f"{n/1_000:.1f}".rstrip("0").rstrip(".")
-        return f"{_GRY}{s}k{_R}"
-    return f"{_GRY}{n}{_R}"
+    return f"{_GRY}{scale_tokens(n)}{_R}"
 
 
 def _total_tokens(t: dict) -> int:
@@ -1146,12 +1218,16 @@ def backfill_mode():
     print(f"backfilled {backfilled} session(s)")
 
 
-# Models added to MODELS on 2026-09-12. Sessions recorded against one of these
-# were priced at _DEFAULT_MODEL ($3/$15) at the time, so their stored cost is
-# known-wrong and worth repricing even without a transcript. Any other model's
-# stored cost is an exact per-call sum and must be left alone (see below).
+# Models added to MODELS on 2026-09-12, plus Haiku 5.5 (2026-11-21). Sessions
+# recorded against one of these were priced at _DEFAULT_MODEL ($3/$15) at the
+# time, so their stored cost is known-wrong and worth repricing even without a
+# transcript. Any other model's stored cost is an exact per-call sum and must be
+# left alone (see below). Fable 5.2 / Sonnet 5.5 are deliberately absent: they
+# were prefix-matched to Fable 5 / Sonnet 5, not billed at the default, so only
+# a transcript can reprice them correctly.
 _NEWLY_PRICED = {
     "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-mythos-5-1",
+    "claude-haiku-5-5",
 }
 
 
@@ -1169,9 +1245,13 @@ def _reprice_session(sess: dict, transcript: Path, price_override: dict) -> tupl
     A session's stored cost is an exact per-call sum, so re-deriving it from that
     flat total at a single model's rate makes *correct* data worse whenever the
     session mixed models — measured at -$21.89 on this repo's own project alone.
-    So the no-transcript path only runs for a model in _NEWLY_PRICED, where the
-    stored cost is known to have been computed at the $3/$15 fallback rate and
-    any reprice is an improvement. Everything else is skipped untouched.
+    So the no-transcript path only runs when the stored cost is *provably* a
+    $3/$15 fallback figure: the model is in _NEWLY_PRICED and the cost equals
+    the flat total priced at _DEFAULT_MODEL (see _recorded_at_default). The model
+    name alone is not proof — a session recorded after its model was priced
+    holds an exact sum, and flat-repricing those once their transcripts aged
+    out showed up as +$374.67 of damage (2026-11-21). Everything else is
+    skipped untouched.
     """
     if transcript and transcript.exists():
         msgs = read_transcript(str(transcript))
@@ -1186,17 +1266,36 @@ def _reprice_session(sess: dict, transcript: Path, price_override: dict) -> tupl
     tokens = sess.get("tokens", {}) or {}
     model = sess.get("model", "")
     resolved = next((k for k in _MODEL_KEYS_BY_LEN if k in model), None)
-    if resolved in _NEWLY_PRICED:
-        return tokens, calc_cost(tokens, model, price_override), model, "approx"
-    return tokens, sess.get("cost", 0), model, "skip"
+    stored = sess.get("cost", 0)
+    if resolved in _NEWLY_PRICED and _recorded_at_default(tokens, stored, price_override):
+        # A flat total can't tell which requests had a long prompt (Haiku 5.5),
+        # so it is priced at the base tier — a floor, but far closer than $3/$15.
+        return tokens, calc_cost(tokens, model, price_override, per_request=False), model, "approx"
+    return tokens, stored, model, "skip"
 
 
-def reprice_mode(argv: list):
+def _recorded_at_default(tokens: dict, stored_cost: float, price_override: dict) -> bool:
+    """True if `stored_cost` is what `tokens` cost at the _DEFAULT_MODEL rates.
+
+    Cost is linear in tokens, so a session whose every call was billed at the
+    fallback has a stored cost equal to its flat total at that one rate. A
+    session priced per call at real rates (or mixing models) does not, bar
+    coincidence. It also makes the reprice self-limiting: once repriced, the
+    cost no longer matches and the session is skipped."""
+    at_default = calc_cost(tokens, "", price_override, per_request=False)
+    return abs(at_default - stored_cost) <= 1e-6 * max(at_default, stored_cost, 1e-9)
+
+
+def reprice_mode(argv: list, transcripts_root: Path = None):
     """One-shot: recompute every stored session's cost at today's MODELS prices.
 
     Use after a pricing correction or after adding a model that sessions had
     previously been falling back to _DEFAULT_MODEL for. Idempotent — running it
     twice changes nothing the second time.
+
+    A session recorded in more than one project is skipped: rebuilding each copy
+    from the one transcript would turn a stale partial copy into a second full
+    one. Run --dedup-sessions first.
 
     Preview by default; pass --yes to write. A `legacy` block is never touched:
     it carries a flat cost_usd with no token breakdown to reprice, and
@@ -1208,19 +1307,24 @@ def reprice_mode(argv: list):
         print("no project data to reprice")
         return
 
-    transcripts_root = Path.home() / ".claude" / "projects"
+    transcripts_root = transcripts_root or Path.home() / ".claude" / "projects"
     sid_to_path = {p.stem: p for p in transcripts_root.glob("*/*.jsonl")} \
         if transcripts_root.exists() else {}
 
     want_pids = {project_id(os.path.abspath(t)) for t in targets} if targets else None
 
-    rows, grand_old, grand_new = [], 0.0, 0.0
-    counts = {"exact": 0, "approx": 0, "skip": 0}
+    projects = []
     for proj_file in sorted(DATA_DIR.glob("*.json")):
         try:
-            data = json.loads(proj_file.read_text(encoding="utf-8"))
+            projects.append(json.loads(proj_file.read_text(encoding="utf-8")))
         except Exception:
             continue
+    holders = Counter(sid for data in projects for sid in data.get("sessions", {}))
+    duplicated = set()
+
+    rows, grand_old, grand_new = [], 0.0, 0.0
+    counts = {"exact": 0, "approx": 0, "skip": 0}
+    for data in projects:
         if want_pids and data.get("pid") not in want_pids:
             continue
         sessions = data.get("sessions", {})
@@ -1231,6 +1335,9 @@ def reprice_mode(argv: list):
         old_total = sum(s.get("cost", 0) for s in sessions.values())
         changed = 0
         for sid, sess in sessions.items():
+            if holders[sid] > 1:
+                duplicated.add(sid)
+                continue
             tokens, cost, model, how = _reprice_session(
                 sess, sid_to_path.get(sid), price_override)
             counts[how] += 1
@@ -1255,8 +1362,12 @@ def reprice_mode(argv: list):
             save_project_data(DATA_DIR, data["pid"], data)
             _refresh_status_proj_segment(data)
 
+    dup_note = (f"{len(duplicated)} session(s) recorded in more than one project were "
+                f"skipped — run --dedup-sessions first, then --reprice again.") if duplicated else ""
     if not rows:
         print("all session costs already match current prices — nothing to reprice")
+        if dup_note:
+            print(dup_note)
         return
 
     width = max(len(r[0]) for r in rows)
@@ -1266,8 +1377,10 @@ def reprice_mode(argv: list):
     print(f"{'TOTAL':{width}}  {'':5} {'':4} {grand_old:11.2f}$ {grand_new:11.2f}$ "
           f"{grand_new - grand_old:+11.2f}$")
     print(f"\n{counts['exact']} repriced exactly from transcript, "
-          f"{counts['approx']} from stored totals (no transcript, newly-priced model), "
-          f"{counts['skip']} left untouched (no transcript, price unchanged).")
+          f"{counts['approx']} from stored totals (no transcript, recorded at the $3/$15 fallback), "
+          f"{counts['skip']} left untouched (no transcript, already priced per call).")
+    if dup_note:
+        print(dup_note)
     print("\napplied." if apply else "\npreview only — re-run with --yes to write.")
 
 
@@ -1877,13 +1990,18 @@ def import_mode(argv: list):
 _KNOWN_USAGE_KEYS = {
     "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
     "cache_creation", "iterations", "speed", "service_tier", "inference_geo",
-    "server_tool_use", "output_tokens_details",
+    "server_tool_use", "output_tokens_details", "fallback_credit",
 }
 _KNOWN_ITERATION_TYPES = {"message", "fallback_message"}
 _BILLED_AS_IS = {  # modifier values that leave list price unchanged (or are handled)
     "speed": {"standard", "fast", None},
     "service_tier": {"standard", None},
-    "inference_geo": {"not_available", None},
+    # "global" is the default and list price; "us" is the 1.1x calc_cost applies.
+    "inference_geo": {"not_available", "global", "us", None},
+    # On every row written by Claude Code 2.1.306–2.1.330 and always null (60k
+    # rows, 2026-11-21); no fallback happened in that data, so what a real value
+    # does to the bill is unknown. Null is fine; anything else is reported.
+    "fallback_credit": {None},
 }
 
 
@@ -1916,8 +2034,11 @@ def audit_transcript(messages: list, acc: dict) -> None:
         for key in usage:
             acc["usage_keys"][key] += 1
         for key, ok in _BILLED_AS_IS.items():
-            if usage.get(key) not in ok:
-                acc["modifiers"][(key, usage.get(key))] += 1
+            val = usage.get(key)
+            if val is not None and not isinstance(val, str):
+                val = json.dumps(val, sort_keys=True)[:80]   # hashable, e.g. a credit object
+            if val not in ok:
+                acc["modifiers"][(key, val)] += 1
         stu = usage.get("server_tool_use") or {}
         acc["web_search"] += stu.get("web_search_requests", 0) or 0
         for it in usage.get("iterations") or []:

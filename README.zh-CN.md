@@ -28,7 +28,9 @@ MYPROJECT Sonnet 4.6 200k 🌡️ 22% 🎯 87% 🎫 18M │ Turn: $0.03 (↑180k
 |------|------|
 | `↑` | 输入 token 总量（非缓存 + cache_creation + cache_read） |
 | `↓` | 生成的输出 token |
-| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费；Opus 5.5 为 0.05×，Fable/Mythos 5.1 为 0.025×） |
+| `«` | `↑` 中由缓存提供的部分（按输入价的 0.1× 计费；Opus 5.5 / Sonnet 5.5 为 0.05×，Fable/Mythos 5.2 与 5.1 为 0.025×） |
+
+token 数量用 `k` / `M` / `B` / `T` 缩写，分别表示千、百万、十亿、万亿（`179k`、`18.4M`、`30.62B`、`1.2T`）。`B` 和 `T` 保留两位小数，这样大项目的总量仍能看出变化。
 
 ## 安装
 
@@ -176,25 +178,33 @@ python3 ~/.claude/hooks/token_tracker.py --merge-into-parent /path/to/child --ye
 
 | 模型 | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |------|-------|--------|----------------|----------------|------------|
+| Fable 5.2 / Mythos 5.2 | $8.00 | $40.00 | $10.00 | $16.00 | $0.20 † |
 | Fable 5.1 / Mythos 5.1 | $10.00 | $50.00 | $12.50 | $20.00 | $0.25 † |
 | Fable 5 / Mythos 5 | $10.00 | $50.00 | $12.50 | $20.00 | $1.00 |
 | Opus 5.5 | $4.00 | $20.00 | $5.00 | $8.00 | $0.20 † |
 | Opus 5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.8 / 4.7 / 4.6 / 4.5 | $5.00 | $25.00 | $6.25 | $10.00 | $0.50 |
 | Opus 4.1 / 4 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
+| Sonnet 5.5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.10 † |
 | Sonnet 5 | $2.00 | $10.00 | $2.50 | $4.00 | $0.20 |
 | Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
+| Haiku 5.5 — prompt ≤ 100K ‡ | $0.10 | $0.50 | $0.125 | $0.20 | $0.01 |
+| Haiku 5.5 — prompt > 100K ‡ | $0.50 | $2.50 | $0.625 | $1.00 | $0.05 |
 | Haiku 4.5 | $1.00 | $5.00 | $1.25 | $2.00 | $0.10 |
 | Sonnet 3.7 / 3.5 | $3.00 | $15.00 | $3.75 | $6.00 | $0.30 |
 | Haiku 3.5 | $0.80 | $4.00 | $1.00 | $1.60 | $0.08 |
 | Opus 3 | $15.00 | $75.00 | $18.75 | $30.00 | $1.50 |
 | Haiku 3 | $0.25 | $1.25 | $0.30 | $0.50 | $0.03 |
 
-价格按每百万 token 计。**Fable 5.1 / 5**、**Mythos 5.1 / 5**、**Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**、**Sonnet 5** 和 **Sonnet 4.6** 支持 1M token 上下文窗口（标准价格），其他模型默认 200K。费率已于 2026-09-22 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
+价格按每百万 token 计。**Fable 5.2 / 5.1 / 5**、**Mythos 5.2 / 5.1 / 5**、**Opus 5.5 / 5 / 4.8 / 4.7 / 4.6**、**Sonnet 5.5 / 5 / 4.6** 和 **Haiku 5.5** 支持 1M token 上下文窗口，其他模型默认 200K。费率已于 2026-11-21 对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 目录核验。计费请以 [Claude Console 用量页面](https://platform.claude.com/usage) 为准。
 
-† 三个模型的缓存读取低于通常的 0.1×：**Opus 5.5** 为 0.05×（$0.20），**Fable 5.1 / Mythos 5.1** 为 0.025×（$0.25）。其他模型均为 0.1×。
+† 以下模型的缓存读取低于通常的 0.1×：**Opus 5.5**（$0.20）与 **Sonnet 5.5**（$0.10）为 0.05×；**Fable 5.2 / Mythos 5.2**（$0.20）与 **Fable 5.1 / Mythos 5.1**（$0.25）为 0.025×。其他模型均为 0.1×。
 
-**快速模式**（fast mode，research preview）对 **Opus 5.5** 按 $8 / $40、对 **Opus 5 / Opus 4.8** 按 $10 / $50（每百万 token）计费。ClaudeCount 通过 transcript 中的 `usage.speed == "fast"` 自动识别并套用该溢价档；缓存倍率在快速模式基价之上叠加。
+‡ **Haiku 5.5 按 prompt 长度计价。** 单次请求的 prompt 超过 100,000 token 时（计入全部输入 token，包括缓存读取与缓存写入，不含输出），该请求的*所有* token 都按较高一行计费。ClaudeCount 依据 transcript 逐次 API 调用判定档位。transcript 已不在的 session 只剩一个扁平总量，看不出每次 prompt 多长，因此 `--reprice` 对这类总量按较低一行计价（是下限）。
+
+**快速模式**（fast mode）对 **Fable 5.2 / Mythos 5.2** 按 $16 / $80、对 **Opus 5.5** 按 $8 / $40、对 **Opus 5 / Opus 4.8** 按 $10 / $50（每百万 token）计费（Opus 4.8 的快速模式已弃用，将于 2026-11-30 移除）。ClaudeCount 通过 transcript 中的 `usage.speed == "fast"` 自动识别并套用该溢价档；缓存倍率在快速模式基价之上叠加。
+
+**数据驻留。** Claude Code 的 transcript 中 `usage.inference_geo` 为 `"global"`，即默认值，按标准价计费。仅限美国的推理（`"us"`）对输入、输出、缓存写入和缓存读取均按 1.1× 计费；transcript 中一旦出现该值，ClaudeCount 会套用这个倍率。
 
 **服务端模型回退（fallback）。** 请求中途回退到另一个模型时（Claude Code 2.1.27x 会在 `usage.iterations` 中记录例如 `claude-fable-5` → `claude-opus-4-8`），两次尝试都会计费，各按各自模型的价格。顶层 `usage` 只覆盖最后一次尝试，因此 ClaudeCount 会逐个 iteration 分别计价。
 
@@ -219,8 +229,12 @@ python3 ~/.claude/hooks/token_tracker.py --reprice --yes     # 应用
 
 transcript 仍在磁盘上的 session 会被精确重算 —— 每次 API 调用都按实际服务它的
 模型计价，并合并 subagent 开销。transcript 已轮转丢失的 session 默认保持原样，
-除非其模型确实曾被错误计价：因为从扁平的 token 总量反推费用，会破坏任何混用了
-多个模型的 session。该命令幂等。
+除非能证明它存储的费用是兜底价算出来的（即恰好等于其 token 总量按 $3/$15 计
+的金额）：因为从扁平的 token 总量反推费用，会破坏任何混用了多个模型的 session。
+该命令幂等。
+
+同时记录在多个项目里的 session 会被跳过，因为用同一份 transcript 重建每一份副本
+会把它算两次。请先运行 `--dedup-sessions`；`--reprice` 在跳过时会给出提示。
 
 ### `--dedup-sessions` — 清除被两个项目重复记账的 session
 
@@ -248,6 +262,25 @@ python3 ~/.claude/hooks/token_tracker.py --dedup-sessions --yes     # 应用
 ## 更新日志
 
 本项目遵循 [Semantic Versioning 2.0](https://semver.org/) 与 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 格式。
+
+### [1.6.0] — 2026-11-21
+
+#### 新增
+- **Claude Fable 5.2**（`claude-fable-5-2`，Claude Code 2.1.321 的默认 Fable）与 **Claude Mythos 5.2**（`claude-mythos-5-2`）：每百万 token $8 / $40，1M 上下文。缓存写入 5m $10.00 / 1h $16.00，缓存读取 **$0.20（输入价的 0.025×）**。快速模式 $16 / $80
+- **Claude Sonnet 5.5**（`claude-sonnet-5-5`，Claude Code 2.1.284 的默认 Sonnet）：每百万 token $2 / $10，1M 上下文，缓存读取 **$0.10（输入价的 0.05×）**
+- **Claude Haiku 5.5**（`claude-haiku-5-5`，Claude Code 2.1.293 的默认 Haiku），第一个按 prompt 长度计价的模型：prompt 不超过 100,000 token 时每百万 token $0.10 / $0.50，超过则 $0.50 / $2.50。档位按每次 API 调用判定
+- **十亿与万亿级 token 单位。** 状态栏与报告中的 token 数量现在按 `k` / `M` / `B` / `T` 逐级缩写；306 亿 token 的项目显示为 `30.62B`，而不是 `30615.6M`
+- **美国数据驻留倍率**：`usage.inference_geo == "us"` 按 1.1× 计费。Claude Code 现在上报 `"global"`（标准价），以前是 `"not_available"`
+
+#### 修复
+- **Fable 5.2 一直被当作 Fable 5 计费和显示**（命中了 `claude-fable-5` 前缀）：输入/输出高估 25%，缓存读取高估 5 倍（$1.00 而非 $0.20）。**Sonnet 5.5 被当作 Sonnet 5 计费**，缓存读取费用翻倍。**Haiku 5.5 完全没有条目**，按 $3 / $15 兜底价计费，是其真实输入价的 30 倍。基于 transcript 对作者历史数据做 `--reprice` 预览，追踪总额变动 −$1,012
+- **`--reprice` 可能改坏本来正确的 session。** transcript 被清理后，只要 session 的模型*曾经*是后补进价目表的，就会用扁平 token 总量按单一费率重算 —— 包括模型补价很久之后才记录的 session，而它们存的是跨多个模型的逐次调用精确合计。预览中这类破坏达 +$375。现在无 transcript 路径只在存储费用恰好等于 token 总量按 $3 / $15 兜底价计的金额时才执行，也就是能证明它确实是兜底价数字时
+- **`--reprice` 会重建同一 session 在两个项目里的每一份副本**，把过时的残缺副本变成第二份完整副本。这类 session 现在会被跳过，并提示先运行 `--dedup-sessions`
+- token 数量四舍五入到某单位的 1000 时显示为 `1000k`，而不是 `1M`
+
+#### 变更
+- `--audit` 接受 `usage.inference_geo` 的 `"global"` / `"us"` 以及新字段 `usage.fallback_credit`。`fallback_credit` 至今只出现过 `null`，它对账单的影响未知；一旦带有实际值，`--audit` 会再次报告
+- 所有费率已于 2026-11-21 重新对照 [platform.claude.com 定价](https://platform.claude.com/docs/en/about-claude/pricing) 核对。确认未变动：Fable 5.1 / 5、Mythos 5.1 / 5、Opus 5.5 / 5 / 4.8 / 4.7 / 4.6 / 4.5、Sonnet 5 / 4.6 / 4.5、Haiku 4.5
 
 ### [1.5.2] — 2026-09-30
 
